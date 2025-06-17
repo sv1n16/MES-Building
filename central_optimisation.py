@@ -17,7 +17,11 @@ radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 load = pd.read_csv("data\\load.csv").values.flatten()
 price = pd.read_csv("data\\price.csv").values.flatten()
 heatload = pd.read_csv("data\\heat_load.csv").values.flatten()
+temperature_setpoint = [17, 17, 17.5, 17.5, 17.5, 17.5, 20, 20, 20, 20, 18, 18]
+
 print(pyo.SolverFactory("gurobi_direct").available())
+
+
 # Parameters
 time_horizon = len(price)  # Number of time steps
 delta_t = 1  # Time step in hours
@@ -27,6 +31,9 @@ initial_soc = 5  # kWh
 eta_charge = 0.9  # Charging efficiency
 eta_discharge = 0.9
 p_th_nom = 8  # Nominal thermal power of the heat pump in kW
+initial_temp = 15  # Initial temperature in degrees Celsius
+
+
 # Update battery and building schedules
 bat = Battery()
 pv = PVModule(time_horizon=time_horizon, start_point=2, radiation=radiation, area=25.0, beta=30.0, eta_noct=0.15)
