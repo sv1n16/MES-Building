@@ -12,7 +12,7 @@ class GasBoiler:
         max_thermal_power=20.0,  # kW, maximum thermal output
         min_thermal_power=0.0,  # kW, minimum thermal output
         efficiency=0.9,  # Boiler efficiency (fraction)
-        gas_price=0.5,  # Gas price (£/kWh or €/kWh)
+        gas_price=0.2,  # Gas price (£/kWh or €/kWh)
         p_th_heat=None,  # Thermal output schedule (kW)
     ):
         self.time_horizon = time_horizon
@@ -32,7 +32,7 @@ class GasBoiler:
         """
         # model.thermal_output = pyo.Var(model.t, bounds=(self.min_thermal_power, self.max_thermal_power), initialize=0)
         model.gas_consumption = pyo.Var(model.t, domain=pyo.Reals, bounds=(0, None), initialize=0)
-        model.p_th_boiler_vars = pyo.Var(model.t, bounds=(-self.max_thermal_power, 0), initialize=0)
+        model.q_boiler_vars = pyo.Var(model.t, bounds=(0, self.max_thermal_power), initialize=0)
         model.boiler_on = pyo.Var(model.t, within=pyo.Binary)
 
     def set_constraints(self, model):
@@ -41,24 +41,15 @@ class GasBoiler:
         """
 
         def gas_consumption_rule(model, t):
-            return (
-                model.gas_consumption[t] == -model.p_th_boiler_vars[t] / self.efficiency
-                if self.efficiency > 0
-                else 0.0
-            )
+            return model.gas_consumption[t] == model.q_boiler_vars[t] / self.efficiency if self.efficiency > 0 else 0.0
 
         model.gas_consumption_constr = pyo.Constraint(model.t, rule=gas_consumption_rule)
 
         # Boiler output is zero if off, and between -max_thermal_power and 0 if on
-        def boiler_output_onoff_rule(model, t):
-            return model.p_th_boiler_vars[t] >= -self.max_thermal_power * model.boiler_on[t]
+        def boiler_max(model, t):
+            return model.q_boiler_vars[t] <= self.max_thermal_power
 
-        model.boiler_output_onoff_min = pyo.Constraint(model.t, rule=boiler_output_onoff_rule)
-
-        def boiler_output_onoff_max_rule(model, t):
-            return model.p_th_boiler_vars[t] <= 0 * model.boiler_on[t]
-
-        model.boiler_output_onoff_max = pyo.Constraint(model.t, rule=boiler_output_onoff_max_rule)
+        model.boiler_output_onoff_min = pyo.Constraint(model.t, rule=boiler_max)
 
     def set_thermal_output(self, schedule):
         """

@@ -12,13 +12,16 @@ from src.Classes.photovoltaic import PVModule
 from src.Classes.building import Building
 from src.Classes.heatpump import HeatPump
 
+from pyomo.util.infeasible import log_infeasible_constraints
+
+
 # Load data
 radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 load = pd.read_csv("data\\load.csv").values.flatten()
 price = pd.read_csv("data\\price.csv").values.flatten()
 heatload = pd.read_csv("data\\heat_load.csv").values.flatten()
 temperature_setpoint = [17, 17, 17.5, 17.5, 17.5, 17.5, 20, 20, 20, 20, 18, 18]
-
+outdoor_temperature = [6.0, 6.17, 6.67, 7.46, 8.5, 9.71, 11.0, 12.29, 13.5, 14.54, 15.33, 15.83]
 print(pyo.SolverFactory("gurobi_direct").available())
 
 
@@ -39,14 +42,14 @@ bat = Battery()
 pv = PVModule(time_horizon=time_horizon, start_point=2, radiation=radiation, area=25.0, beta=30.0, eta_noct=0.15)
 hp = HeatPump(time_horizon=time_horizon)
 boiler = GasBoiler(time_horizon=time_horizon)
-bd = Building([bat, pv])
+bd = Building(building_components=[bat, pv])
 # Gurobi model
 model = pyo.ConcreteModel()
 model.t = pyo.RangeSet(0, time_horizon - 1)
 
 hp.p_th_heat = heatload
 boiler.p_th_heat = heatload
-hp.set_parameters(model)
+hp.set_parameters(model, T_out=outdoor_temperature, time_horizon=time_horizon)
 hp.set_constraints(model)
 
 bat.set_parameters(model)
@@ -56,20 +59,22 @@ boiler.set_parameters(model)
 boiler.set_constraints(model)
 pv.p_el_schedule = -1 * pv.p_el_supply
 
+bd.set_parameters(
+    model=model,
+    time_horizon=time_horizon,
+    T_set=temperature_setpoint,
+    T_init=initial_temp,
+    T_out=outdoor_temperature,
+)
+bd.set_building_constraints(model, time_horizon, temperature_setpoint, initial_temp, delta_t)
+# # Exclusivity: can't be on at the same time
+# def exclusive_on_rule(model, t):
+#     return model.hp_on[t] + model.boiler_on[t] <= 1
 
-# Exclusivity: can't be on at the same time
-def exclusive_on_rule(model, t):
-    return model.hp_on[t] + model.boiler_on[t] <= 1
 
+# model.exclusive_on_constr = pyo.Constraint(model.t, rule=exclusive_on_rule)
 
-model.exclusive_on_constr = pyo.Constraint(model.t, rule=exclusive_on_rule)
-
-
-def heat_demand_match_rule(model, t):
-    return -model.p_th_heat_vars[t] - model.p_th_boiler_vars[t] == heatload[t]
-
-
-model.heat_demand_match = pyo.Constraint(model.t, rule=heat_demand_match_rule)
+penalty_weight = 100
 
 
 # Objective: Minimize total cost
@@ -77,6 +82,7 @@ def objective(model):
     return sum(
         price[t] * (load[t] - pv.p_el_supply[t] + model.charge[t] - model.discharge[t] + model.p_el_vars[t]) * delta_t
         + boiler.gas_price * model.gas_consumption[t] * delta_t
+        + penalty_weight * (model.T_in[t] - model.T_set[t]) ** 2
         for t in model.t
     )
 
@@ -85,8 +91,9 @@ model.obj = pyo.Objective(rule=objective, sense=pyo.minimize)
 
 
 solver = pyo.SolverFactory("gurobi_direct")
-result = solver.solve(model, tee=True)
+result = solver.solve(model, tee=True, logfile="Results/Temp_setpoint/solver_log.txt")
 
+log_infeasible_constraints(model)
 # Extract results
 charge_schedule = [pyo.value(model.charge[t]) for t in model.t]
 discharge_schedule = [pyo.value(model.discharge[t]) for t in model.t]
@@ -101,13 +108,15 @@ bat.p_el_charge_schedule = charge_schedule
 bat.p_el_discharge_schedule = discharge_schedule
 bat.energy_el_schedule = soc_schedule
 bat.power_el_schedule = np.array(charge_schedule) - np.array(discharge_schedule)
-hp_thermal_output = -np.array([pyo.value(model.p_th_heat_vars[t]) for t in model.t])
+hp_thermal_output = -np.array([pyo.value(model.q_heat_vars[t]) for t in model.t])
 hp_electric_consumption = [pyo.value(model.p_el_vars[t]) for t in model.t]
+indoor_temperature = [pyo.value(model.T_in[t]) for t in model.t]
+
 bd.p_el_schedule = load + charge_schedule - discharge_schedule - pv.p_el_supply + hp_electric_consumption
 
-hp_on_schedule = [pyo.value(model.hp_on[t]) for t in model.t]
-boiler_on_schedule = [pyo.value(model.boiler_on[t]) for t in model.t]
-boiler_thermal_output = -np.array([pyo.value(model.p_th_boiler_vars[t]) for t in model.t])
+# hp_on_schedule = [pyo.value(model.hp_on[t]) for t in model.t]
+# boiler_on_schedule = [pyo.value(model.boiler_on[t]) for t in model.t]
+boiler_thermal_output = -np.array([pyo.value(model.q_boiler_vars[t]) for t in model.t])
 boiler_gas_consumption = [pyo.value(model.gas_consumption[t]) for t in model.t]
 
 # # Calculate costs
@@ -129,7 +138,7 @@ fig = make_subplots(
     shared_xaxes=True,
     subplot_titles=(
         "Battery SOC",
-        "HP/Boiler On/Off",
+        "Temperature (Indoor/Outdoor/Setpoint)",
         "Battery Charge/Discharge",
         "HP Thermal Output",
         "Building Import/Export",
@@ -157,8 +166,10 @@ fig.add_trace(go.Scatter(x=plot_time, y=pv.p_el_supply, name="PV Supply (kWh)"),
 fig.add_trace(go.Scatter(x=plot_time, y=costs, name="Cost Over Time"), row=8, col=1)
 
 
-fig.add_trace(go.Scatter(x=plot_time, y=hp_on_schedule, name="HP On (binary)"), row=1, col=2)
-fig.add_trace(go.Scatter(x=plot_time, y=boiler_on_schedule, name="Boiler On (binary)"), row=1, col=2)
+fig.add_trace(go.Scatter(x=plot_time, y=indoor_temperature, name="Indoor Temp (°C)"), row=1, col=2)
+fig.add_trace(go.Scatter(x=plot_time, y=outdoor_temperature, name="Outdoor Temp (°C)"), row=1, col=2)
+fig.add_trace(go.Scatter(x=plot_time, y=temperature_setpoint, name="setpoint Temp (°C)"), row=1, col=2)
+
 fig.add_trace(go.Scatter(x=plot_time, y=hp_thermal_output, name="HP Thermal Output (kWh)"), row=2, col=2)
 fig.add_trace(go.Scatter(x=plot_time, y=boiler_thermal_output, name="Boiler Thermal Output (kWh)"), row=3, col=2)
 fig.add_trace(go.Scatter(x=plot_time, y=heatload, name="Thermal Load (kWh)"), row=4, col=2)
@@ -184,6 +195,7 @@ fig.update_yaxes(title_text="Cost (ct)", row=7, col=1)
 fig.update_yaxes(title_text="Thermal (kWh)", row=8, col=1)
 fig.update_yaxes(title_text="HP Elec (kWh)", row=9, col=1)
 
+fig.update_yaxes(title_text="Temperature (°C)", row=1, col=2)
 fig.update_layout(title_text="Scheduling Results Local Central Optimisation")
 fig.update_layout(uniformtext_minsize=8)
 
