@@ -44,7 +44,6 @@ class Building:
 
         # Thermal conductance per m² by insulation quality [kW/°C per 100 m²]
         u_lookup = {"good": 0.2 / 100, "average": 0.5 / 100, "poor": 1.0 / 100}
-        print(floor_area_m2, construction_type, insulation_level)
         if construction_type not in c_lookup:
             raise ValueError("Invalid construction type. Choose from: 'light', 'medium', 'heavy'")
         if insulation_level not in u_lookup:
