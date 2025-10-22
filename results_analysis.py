@@ -25,10 +25,16 @@ fig.update_layout(
     xaxis_title="Time (h)",
     yaxis=dict(title="Cost (£/h)"),
     yaxis2=dict(title="Electricity Price (p/kWh)", overlaying="y", side="right"),
-    legend=dict(x=0.01, y=0.99),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=-0.3,
+        xanchor="center",
+        x=0.5,
+        font=dict(size=14),
+    ),
     template="plotly_white",
     margin=dict(l=40, r=40, t=40, b=40),
-    font=dict(size=9),
 )
 fig.show()
 
@@ -43,10 +49,16 @@ fig2.update_layout(
     title="Battery Charging Schedule",
     xaxis_title="Time (h)",
     yaxis_title="Battery State of Charge (kWh)",
-    legend=dict(x=0.01, y=0.99),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=-0.3,
+        xanchor="center",
+        x=0.5,
+        font=dict(size=14),
+    ),
     template="plotly_white",
     margin=dict(l=40, r=40, t=40, b=40),
-    font=dict(size=9),
 )
 fig2.show()
 
@@ -70,10 +82,16 @@ fig3.update_layout(
     title="Heat Pump and Boiler Output Comparison",
     xaxis_title="Time (h)",
     yaxis_title="Thermal Output (kW)",
-    legend=dict(x=0.01, y=0.99),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=-0.3,
+        xanchor="center",
+        x=0.5,
+        font=dict(size=14),
+    ),
     template="plotly_white",
     margin=dict(l=40, r=40, t=40, b=40),
-    font=dict(size=9),
 )
 fig3.show()
 
@@ -103,9 +121,15 @@ fig4.update_layout(
     title="Indoor Temperature and Setpoint Comparison",
     xaxis_title="Time (h)",
     yaxis_title="Temperature (°C)",
-    legend=dict(x=0.01, y=0.99),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=-0.3,
+        xanchor="center",
+        x=0.5,
+        font=dict(size=14),
+    ),
     template="plotly_white",
     margin=dict(l=40, r=40, t=40, b=40),
-    font=dict(size=9),
 )
 fig4.show()

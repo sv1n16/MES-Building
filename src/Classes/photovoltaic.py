@@ -1,12 +1,27 @@
-import numpy as np 
-import pandas as pd 
+import numpy as np
+import pandas as pd
+
 
 class PVModule:
 
-    def __init__(self, time_horizon,start_point, radiation, method=1, area=0.0, peak_power=0.0, eta_noct=0.18, radiation_noct=1000.0,
-                 t_cell_noct=45.0, t_ambient_noct=20.0, alpha_noct=0, beta=0, gamma=0, tau_alpha=0.9,
-                 force_renewables=True):
-        
+    def __init__(
+        self,
+        time_horizon,
+        start_point,
+        radiation,
+        method=1,
+        area=0.0,
+        peak_power=0.0,
+        eta_noct=0.18,
+        radiation_noct=1000.0,
+        t_cell_noct=45.0,
+        t_ambient_noct=20.0,
+        alpha_noct=0,
+        beta=0,
+        gamma=0,
+        tau_alpha=0.9,
+        force_renewables=True,
+    ):
         """
         method: how power is computed, 1 computes power based on peak power
         area : float, optional
@@ -37,22 +52,22 @@ class PVModule:
             NOCT conditions: See manufacturer's data sheets or
             Duffie, Beckman - Solar Engineering of Thermal Processes (4th ed.), page 759
         beta : float, optional
-            Slope, the angle (in degree) between the plane of the surface in 
-            question and the horizontal. 0 <= beta <= 180. If beta > 90, the 
+            Slope, the angle (in degree) between the plane of the surface in
+            question and the horizontal. 0 <= beta <= 180. If beta > 90, the
             surface faces downwards.
         gamma : float, optional
-            Surface azimuth angle. The deviation of the projection on a 
-            horizontal plane of the normal to the surface from the local 
+            Surface azimuth angle. The deviation of the projection on a
+            horizontal plane of the normal to the surface from the local
             meridian, with zero due south, east negative, and west positive.
             -180 <= gamma <= 180
         tau_alpha : float
-            Optical properties of the PV unit. Product of absorption and 
+            Optical properties of the PV unit. Product of absorption and
             transmission coeffients.
-            According to Duffie, Beckman - Solar Engineering of Thermal 
+            According to Duffie, Beckman - Solar Engineering of Thermal
             Processes (4th ed.), page 758, this value is typically close to 0.9
         """
-        self._kind = "pv"        
-        
+        self._kind = "pv"
+
         self.time_horizon = time_horizon
         self.radiation = radiation
         self.method = method
@@ -69,16 +84,16 @@ class PVModule:
         self.beta = beta
         self.gamma = gamma
         self.tau_alpha = tau_alpha
-        
+        self.G_STC = 1000  # W/m²
+        self.T_STC = 25  # °C
         self.total_power = np.zeros(time_horizon)
         self.total_radiation = np.zeros(time_horizon)
         self.current_power = np.zeros(time_horizon)
 
         self.force_renewables = force_renewables
-        self.getPower(currentValues=False) #calculates total power for the entire simulation horizon
-        print(len(self.total_power))
-        self.p_el_supply = self.total_power[start_point:start_point+self.time_horizon] / 1000 
-        
+        self.getPower(currentValues=False)  # calculates total power for the entire simulation horizon
+        self.p_el_supply = self.total_power[start_point : start_point + self.time_horizon] / 1000
+
     def _computePowerArea(self, currentValues=True):
         """
         Compute PV electric output power based on a certain area equipped with PV panels
@@ -96,7 +111,6 @@ class PVModule:
         """
         # Get radiation on a tilted surface
 
-
         # If no temperature coefficient is given, a simple PV model is applied
         if self.alpha_noct == 0:
             power = self.area * self.eta_noct * self.radiation
@@ -105,34 +119,35 @@ class PVModule:
             getTemperature = self.environment.weather.getWeatherForecast
             t_ambient = getTemperature(getTAmbient=True, currentValues=currentValues)
 
-            # Compute the cell temperature. 
+            # Compute the cell temperature.
             # Assumption: Wind velocity is 1 m/s (same as NOCT conditions)
             # The resulting equation is based on equation 23.3.3 (page 758,
             # Duffie, Beckman - Solar Engineering of Thermal Processes, 4th ed)
-            # as well as equation 3 (Skroplaki, Palyvos - 2009 - On the 
-            # temperature dependence of photovoltaic module electrical 
+            # as well as equation 3 (Skroplaki, Palyvos - 2009 - On the
+            # temperature dependence of photovoltaic module electrical
             # performance. A review of efficiency-power correlations.)
-            
+
             # Introduce a few abbreviations
             a1 = (self.t_cell_noct - self.t_ambient_noct) * self.radiation[0] / self.radiation_noct
             denominator = 1 - a1 * self.alpha_noct * self.eta_noct / self.tau_alpha
             numerator = 1 - self.alpha_noct * (t_ambient[0] - self.t_cell_noct + a1)
             eta = self.eta_noct * numerator / denominator
-        
+
             # Compute power
             power = self.area * eta * self.radiation
-        
+
         return (power, self.radiation[0])
-    def getPower(self, time_horizon=None, currentValues=True,current_timestep=0, timesteps=1):
+
+    def getPower(self, time_horizon=None, currentValues=True, current_timestep=0, timesteps=1):
         """
         compute the power over the simulation horizon
         """
         (current_power, currentRadiation) = self._computePowerArea(currentValues=currentValues)
-        if currentValues: 
+        if currentValues:
             self.current_power = current_power
 
-            self.total_power[current_timestep:(current_timestep + timesteps)] = current_power
-            self.total_radiation[current_timestep:(current_timestep + timesteps)] = currentRadiation
+            self.total_power[current_timestep : (current_timestep + timesteps)] = current_power
+            self.total_radiation[current_timestep : (current_timestep + timesteps)] = currentRadiation
             return self.current_power
 
         else:
@@ -140,3 +155,65 @@ class PVModule:
             self.total_radiation = currentRadiation
             return self.total_power
 
+    #### Potentially simplify code above this line ####
+    def calculate_cell_temperature(self, irradiance, ambient_temp, wind_speed=1.0):
+        """
+        Estimate cell temperature from ambient conditions
+
+        Parameters:
+        -----------
+        irradiance : float or array
+            Solar irradiance (W/m²)
+        ambient_temp : float or array
+            Ambient air temperature (°C)
+        wind_speed : float or array
+            Wind speed (m/s)
+
+        Returns:
+        --------
+        T_cell : float or array
+            Estimated cell temperature (°C)
+        """
+        # NOCT (Nominal Operating Cell Temperature) model
+        # NOCT typically 45°C for most panels
+        NOCT = 45
+
+        T_cell = ambient_temp + (NOCT - 20) * (irradiance / 800) * (1 - self.efficiency * 0.5)
+
+        # Wind cooling effect (simplified)
+        wind_factor = 1 / (1 + 0.05 * wind_speed)
+        T_cell = ambient_temp + (T_cell - ambient_temp) * wind_factor
+
+        return T_cell
+
+    def calculate_power_simple(self, irradiance, ambient_temp=25):
+        """
+        Simple power calculation (most commonly used)
+
+        Parameters:
+        -----------
+        irradiance : float or array
+            Solar irradiance (W/m²)
+        ambient_temp : float or array
+            Ambient temperature (°C)
+
+        Returns:
+        --------
+        power : float or array
+            PV output power (W)
+        """
+        # Estimate cell temperature
+        T_cell = self.calculate_cell_temperature(irradiance, ambient_temp)
+
+        # Temperature-corrected power
+        power = (
+            self.rated_power
+            * (irradiance / self.G_STC)
+            * (1 + self.temp_coefficient * (T_cell - self.T_STC))
+            * self.performance_ratio
+        )
+
+        # Ensure non-negative
+        power = np.maximum(0, power)
+
+        return power

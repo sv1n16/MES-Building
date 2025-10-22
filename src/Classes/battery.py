@@ -5,22 +5,12 @@ import pyomo.environ as pyo
 
 class Battery:
 
-    def __init__(
-        self,
-        max_discharge_power=4.6,
-        max_charge_power=4.6,
-        initial_soc=0.8,
-        max_capacity=12.0,
-        eta_charge=0.9,  # Charging efficiency
-        eta_discharge=0.9,
-        p_el_demand=None,
-        p_el_supply=None,
-    ):
-        self.max_charge_power = max_charge_power
-        self.max_discharge_power = max_discharge_power
-        self.initial_soc = max_capacity * initial_soc
-        self.max_capacity = max_capacity
-        self.eta = eta_charge
+    def __init__(self, p_el_demand=None, p_el_supply=None, **kwargs):
+        self.max_charge_power = kwargs.get("max_charge_power", 4.6)
+        self.max_discharge_power = kwargs.get("max_discharge_power", 4.6)
+        self.max_capacity = kwargs.get("capacity", 12.0)
+        self.initial_soc = kwargs.get("initial_soc", 0.8) * self.max_capacity
+        self.eta = kwargs.get("eta_charge", 0.9)  # Charging efficiency
 
         self.p_el_charge_schedule = p_el_demand
         self.p_el_discharge_schedule = p_el_supply

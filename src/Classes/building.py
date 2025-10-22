@@ -2,22 +2,25 @@ import pyomo.environ as pyo
 
 
 class Building:
-    def __init__(
-        self,
-        building_size=100,
-        building_components=[],
-        construction_type="medium",
-        insulation_level="average",
-        heatload=None,
-        time_horizon=12,
-    ):
+    def __init__(self, building_components=[], heatload=None, time_horizon=12, **kwargs):
+
+        building_parameters = kwargs.get("thermal", {})
         self.building_components = building_components
         self.C, self.U = self.estimate_thermal_parameters(
-            floor_area_m2=building_size,
-            construction_type=construction_type,
-            insulation_level=insulation_level,
+            floor_area_m2=building_parameters.get("size", 100),
+            construction_type=building_parameters.get("construction_type", "medium"),
+            insulation_level=building_parameters.get("insulation_level", "average"),
         )
+        self.model = kwargs.get("model", None)
+        self.time_horizon = kwargs.get("time_horizon", time_horizon)
+        self.T_out = kwargs.get("T_out")  # Default outdoor temperature if not provided
+        self.T_init = kwargs.get("T_init", 20)  # Default initial indoor temperature if not provided
+        self.T_set = kwargs.get("T_set", [21] * time_horizon)  # Default setpoint if not provided
+        self.update_model_parameters()
+        self.update_model_constraints()
+        print(building_components)
         self.heatload = heatload
+
         if self.heatload is None:
             self.heatload = [0] * time_horizon  # Default heat load if not provided
 
@@ -54,24 +57,24 @@ class Building:
 
         return round(C, 2), round(U, 3)
 
-    def set_parameters(self, model, time_horizon, T_out, T_init, T_set):
+    def set_parameters(self, time_horizon, T_out, T_init, T_set):
         # model.q_heat = pyo.Param(
         #     range(time_horizon),
         #     mutable=True,
         # )
-        model.T_set = pyo.Param(model.t, initialize={t: T_set[t] for t in range(time_horizon)})
-        # model.T_out = pyo.Param(model.t, initialize={t: T_out[t] for t in range(time_horizon)})
-        model.T_in = pyo.Var(range(time_horizon), within=pyo.NonNegativeReals, initialize=T_init)
-        model.q_heat = pyo.Var(range(time_horizon), within=pyo.NonNegativeReals)
+        self.model.T_set = pyo.Param(self.model.t, initialize={t: T_set[t] for t in range(time_horizon)})
+        self.model.T_out = pyo.Param(self.model.t, initialize={t: T_out[t] for t in range(time_horizon)})
+        self.model.T_in = pyo.Var(self.model.t, within=pyo.NonNegativeReals, initialize=T_init)
+        self.model.q_heat = pyo.Var(self.model.t, within=pyo.NonNegativeReals)
 
     def set_building_constraints(self, model, time_horizon, T_out, T_init, delta_t):
 
         def heat_balance_rule(model, t):
-            return model.q_heat_vars[t] + model.q_boiler_vars[t] == model.q_heat[t]
+            return self.model.q_heat_vars[t] + model.q_boiler_vars[t] == model.q_heat[t]
 
-        model.heat_demand_match = pyo.Constraint(model.t, rule=heat_balance_rule)
+        self.model.heat_demand_match = pyo.Constraint(model.t, rule=heat_balance_rule)
 
-        def thermal_dymanics(self, model, t, T_init, delta_t):
+        def thermal_dynamics(self, model, t, T_init, delta_t):
             """
             Define the thermal dynamics of the building.
 
@@ -98,8 +101,32 @@ class Building:
                 model.q_heat[t] - self.U * (model.T_in[t - 1] - model.T_out[t])
             )
 
-        model.thermal_inertia = pyo.Constraint(
-            model.t,
-            rule=lambda model, t: thermal_dymanics(self, model, t, T_init, delta_t),
+        self.model.thermal_inertia = pyo.Constraint(
+            self.model.t,
+            rule=lambda model, t: thermal_dynamics(self, model, t, T_init, delta_t),
         )
         Tmax = 26  # Maximum allowed indoor temperature (°C)
+
+    def set_component_parameters(self):
+        for component in self.building_components:
+            component.set_parameters(self.model)
+
+    def set_component_constraints(self):
+        for component in self.building_components:
+            component.set_constraints(self.model)
+
+    def update_model_parameters(self):
+        self.set_parameters(
+            self.time_horizon,
+            self.T_out,
+            self.T_init,
+            self.T_set,
+        )
+        self.set_component_parameters()
+
+    def update_model_constraints(self):
+        self.set_building_constraints(self.model, self.time_horizon, self.T_out, self.T_init, delta_t=1)
+        self.set_component_constraints()
+
+    def get_model(self):
+        return self.model
