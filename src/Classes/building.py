@@ -54,7 +54,6 @@ class Building:
 
         C = c_lookup[construction_type] * floor_area_m2  # kWh/°C
         U = u_lookup[insulation_level] * floor_area_m2  # kW/°C
-
         return round(C, 2), round(U, 3)
 
     def set_parameters(self, time_horizon, T_out, T_init, T_set):
