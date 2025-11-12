@@ -35,7 +35,7 @@ max_power = 4.6  # kW
 initial_soc = 0.8 * battery_capacity  # kWh
 eta_charge = 0.9  # Charging efficiency
 eta_discharge = 0.9
-n_buildings = 2
+n_buildings = 1
 p_th_nom = 12
 T_ref = 7
 cop = np.ones(time_horizon) * 2.18
@@ -70,6 +70,7 @@ model.electric_load = pyo.Param(
 )
 
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
+model.p_el_vars = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
 
 # Add missing variables and parameters for heat pump and building thermal model
 model.q_heat_vars = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=0)
@@ -165,14 +166,16 @@ for b in model.buildings:
     setattr(model, constr_name_cop_constr, pyo.Constraint(model.buildings, model.t, rule=cop_rule))
     setattr(model, constr_name_gas_consumption, pyo.Constraint(model.buildings, model.t, rule=gas_consumption_rule))
     setattr(model, constr_name_boiler_max, pyo.Constraint(model.buildings, model.t, rule=boiler_max))
+
+
 ## General constraints
-# def electricity_balance_rule(model, b, t):
-#     return model.electric_load[b, t] == (
-#         model.pv_supply[b, t] + model.discharge[b, t] - model.charge[b, t] + model.p_el_vars[b, t]
-#     )
+def electricity_balance_rule(model, b, t):
+    return model.electric_load[b, t] + model.p_hp[b, t] + model.charge[b, t] == (
+        model.pv_supply[b, t] + model.discharge[b, t] + model.p_el_vars[b, t]
+    )
 
 
-# model.electric_balance = pyo.Constraint(model.buildings, model.t, rule=electricity_balance_rule)
+model.electric_balance = pyo.Constraint(model.buildings, model.t, rule=electricity_balance_rule)
 
 
 def heat_balance_rule(model, b, t):

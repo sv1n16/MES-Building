@@ -121,13 +121,13 @@ for b in model.buildings:
     )
 
 
-# def electricity_balance_rule(model, b, t):
-#     return model.electric_load[b, t] == (
-#         model.pv_supply[b, t] + model.discharge[b, t] - model.charge[b, t] + model.p_el_vars[b, t]
-#     )
+def electricity_balance_rule(model, b, t):
+    return model.electric_load[b, t] == (
+        model.pv_supply[b, t] + model.discharge[b, t] - model.charge[b, t] + model.p_el_vars[b, t]
+    )
 
 
-# model.electric_balance = pyo.Constraint(model.buildings, model.t, rule=electricity_balance_rule)
+model.electric_balance = pyo.Constraint(model.buildings, model.t, rule=electricity_balance_rule)
 
 
 def objective(model):
