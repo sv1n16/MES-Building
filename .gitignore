@@ -11,3 +11,6 @@
 *.env
 Results
 __pycache__
+
+#Ignore Huge dataset
+data/IDEAL Dataset/

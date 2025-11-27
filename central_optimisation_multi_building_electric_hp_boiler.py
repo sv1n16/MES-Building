@@ -252,18 +252,20 @@ q_total_schedule = np.array([[pyo.value(model.q_heat[b, t]) for t in model.t] fo
 electricity_costs = []
 gas_costs = []
 total_costs = []
-
 fig = make_subplots(
     rows=n_buildings,
     cols=3,
-    subplot_titles=([f"building {b}" for b in model.buildings] * 3),
+    subplot_titles=(f"Battery and Heat Pump Operation", "Building Temperatures", "Costs"),
+    shared_xaxes=True,
+    shared_yaxes=False,
 )
 
 for b in model.buildings:
     print(b)
+    row = b + 1
 
-    # Electricity cost per building
-    elec_cost_b = sum(
+    # Electricity & Gas costs
+    elec_cost_b_schedule = [
         price[t]
         * (
             pyo.value(model.p_hp[b, t])
@@ -274,92 +276,150 @@ for b in model.buildings:
         )
         * delta_t
         for t in model.t
-    )
-    print("Gas consumption:", [pyo.value(model.gas_consumption[b, t]) for t in model.t])
-    # Gas cost per building
-    gas_cost_b = sum(gas_price * pyo.value(model.gas_consumption[b, t]) * delta_t for t in model.t)
+    ]
+
+    elec_cost_b = sum(elec_cost_b_schedule)
+    gas_cost_b_schedule = [gas_price * pyo.value(model.gas_consumption[b, t]) * delta_t for t in model.t]
+    gas_cost_b = sum(gas_cost_b_schedule)
 
     total_b = elec_cost_b + gas_cost_b
-
     electricity_costs.append(elec_cost_b)
     gas_costs.append(gas_cost_b)
     total_costs.append(total_b)
-    print(
-        f"Building {b}: Electricity Cost = {elec_cost_b:.2f}, Gas Cost = {gas_cost_b:.2f}, Total Cost = {total_b:.2f}"
+
+    # Energy variables (Column 1)
+    fig.add_trace(
+        go.Scatter(y=load_schedule[b], mode="lines", name="Load (kW)", line=dict(color="black"), showlegend=(b == 0)),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=pv_schedule[b], mode="lines", name="PV Supply (kW)", line=dict(color="orange"), showlegend=(b == 0)
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=net_charge_schedule[b],
+            mode="lines",
+            name="Battery Net Charge (kW)",
+            line=dict(color="blue"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=soc_schedule[b], mode="lines", name="Battery SOC (kWh)", line=dict(color="purple"), showlegend=(b == 0)
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=heatpump_schedule[b], mode="lines", name="Heat Pump (kW)", line=dict(color="green"), showlegend=(b == 0)
+        ),
+        row=row,
+        col=1,
     )
 
-    # Energy-related variables
-    fig.add_trace(
-        go.Scatter(y=load_schedule[b], mode="lines", name="Load (kW)", line=dict(color="black")), row=b + 1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(y=pv_schedule[b], mode="lines", name="PV Supply (kW)", line=dict(color="orange")), row=b + 1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(y=net_charge_schedule[b], mode="lines", name="Battery Net Charge (kW)", line=dict(color="blue")),
-        row=b + 1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(y=soc_schedule[b], mode="lines", name="Battery SOC (kWh)", line=dict(color="purple")),
-        row=b + 1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(y=heatpump_schedule[b], mode="lines", name="Heat Pump (kW)", line=dict(color="green")),
-        row=b + 1,
-        col=1,
-    )
-
-    # Temperature plot (Indoor vs Outdoor vs Setpoint)
+    # Temperatures (Column 2)
     T_in = [pyo.value(model.T_in[b, t]) for t in model.t]
     T_out = [pyo.value(model.T_out[b, t]) for t in model.t]
     T_set = [model.T_set[b, t] for t in model.t]
 
     fig.add_trace(
-        go.Scatter(y=T_in, mode="lines", name="Indoor Temp (°C)", line=dict(color="firebrick")), row=b + 1, col=2
-    )
-    fig.add_trace(
-        go.Scatter(y=T_out, mode="lines", name="Outdoor Temp (°C)", line=dict(color="deepskyblue")), row=b + 1, col=2
-    )
-    fig.add_trace(
-        go.Scatter(y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="darkgreen", dash="dash")),
-        row=b + 1,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(y=q_boiler_schedule[b], mode="lines", name="Boiler Output (kW)", line=dict(color="red", width=2)),
-        row=b + 1,
+        go.Scatter(y=T_in, mode="lines", name="Indoor Temp (°C)", line=dict(color="firebrick"), showlegend=(b == 0)),
+        row=row,
         col=2,
     )
     fig.add_trace(
         go.Scatter(
-            y=q_heatpump_schedule[b], mode="lines", name="Heat Pump Output (kW)", line=dict(color="blue", width=2)
+            y=T_out, mode="lines", name="Outdoor Temp (°C)", line=dict(color="deepskyblue"), showlegend=(b == 0)
         ),
-        row=b + 1,
+        row=row,
         col=2,
     )
     fig.add_trace(
         go.Scatter(
-            y=q_total_schedule[b], mode="lines", name="Total Heat Demand (kW)", line=dict(color="black", dash="dash")
+            y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="darkgreen", dash="dash"), showlegend=(b == 0)
         ),
-        row=b + 1,
+        row=row,
         col=2,
     )
-    # Add secondary y-axis for electricity price
     fig.add_trace(
-        go.Scatter(y=price, mode="lines", name="Electricity Price", line=dict(color="gold")), row=b + 1, col=3
+        go.Scatter(
+            y=q_boiler_schedule[b],
+            mode="lines",
+            name="Boiler Output (kW)",
+            line=dict(color="red", width=2),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=2,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=q_heatpump_schedule[b],
+            mode="lines",
+            name="Heat Pump Output (kW)",
+            line=dict(color="blue", width=2),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=2,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=q_total_schedule[b],
+            mode="lines",
+            name="Total Heat Demand (kW)",
+            line=dict(color="black", dash="dash"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=2,
     )
 
-    # # Layout
-    # fig.update_layout(
-    #     title=f"Building {b}: Energy, Temperature, and Price",
-    #     xaxis_title="Time Step",
-    #     yaxis_title="Power / Energy / Temperature",
-    #     yaxis2=dict(title="Electricity Price", overlaying="y", side="right", showgrid=False),
-    #     legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5),
-    #     height=600,
-    #     width=1000,
+    # Electricity price (Column 3)
+    fig.add_trace(
+        go.Scatter(y=price, mode="lines", name="Electricity Price", line=dict(color="pink"), showlegend=(b == 0)),
+        row=row,
+        col=3,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=elec_cost_b_schedule,
+            mode="lines",
+            name="Electricity Consumption Cost",
+            line=dict(color="gold"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=3,
+    )
+    # fig.add_trace(
+    #     go.Scatter(
+    #         y=gas_cost_b_schedule,
+    #         mode="lines",
+    #         name="Gas Consumption Cost",
+    #         line=dict(color="brown"),
+    #         showlegend=(b == 0),
+    #     ),
+    #     row=row,
+    #     col=3,
     # )
+    # Axis labels
+    fig.update_xaxes(title_text="Time", row=row, col=1)
+    fig.update_yaxes(title_text="Power/Energy (kW/kWh)", title_font=dict(size=10), row=row, col=1)
 
-    fig.show()
+    fig.update_xaxes(title_text="Time", row=row, col=2)
+    fig.update_yaxes(title_text="Temperature (°C)", title_font=dict(size=10), row=row, col=2)
+
+    fig.update_xaxes(title_text="Time", row=row, col=3)
+    fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
+
+fig.show()
