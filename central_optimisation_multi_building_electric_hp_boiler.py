@@ -17,44 +17,54 @@ import pyomo.environ as pyo
 
 model = pyo.ConcreteModel()
 
-
-# Load data
-radiation = pd.read_csv("data\\radiation.csv").values.flatten()
-electric_load = pd.read_csv("data\\load.csv").values.flatten()
-price = pd.read_csv("data\\price.csv").values.flatten()
-heatload = pd.read_csv("data\\heat_load.csv").values.flatten()
-temperature_setpoint = [17, 17, 17.5, 17.5, 17.5, 17.5, 20, 20, 20, 20, 18, 18]
-outdoor_temperature = [6.0, 6.17, 6.67, 7.46, 8.5, 9.71, 11.0, 12.29, 13.5, 14.54, 15.33, 15.83]
+### Units information ####
+#
+#
+# # Load: W
+# Price: p/kWh
+# Gas price: p/kWh
 
 
+###
+
+
+data = pd.read_csv("data\\processed_data_2018_02_21.csv")
+data.columns = data.columns.str.strip().str.lower()
+print(data.columns)
+# Convert electricity price from p/kWh to £/kWh
+if "price" in data.columns:
+    data["price"] = data["price"] / 100.0
+
+irradiance = data["pv"].values.flatten()
 # Parameters
-time_horizon = len(price)  # Number of time steps
+time_horizon = int(len(data))  # Number of hours in the time horizon
+print(time_horizon)
 delta_t = 1  # Time step in hours
 battery_capacity = 12  # kWh
 max_power = 4.6  # kW
-initial_soc = 0.8 * battery_capacity  # kWh
+initial_soc = 0.1 * battery_capacity  # kWh
 eta_charge = 0.9  # Charging efficiency
 eta_discharge = 0.9
-n_buildings = 3
+n_buildings = 1
 p_th_nom = 12
 T_ref = 7
 cop = np.ones(time_horizon) * 2.18
 T_init = 15
 max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
-gas_price = 0.5  # Gas price (currency/kWh)
+gas_price = 5  # Gas price (p/kWh)
 # ---- Sets ----
 model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
-dt = 1.0
+dt = 60  # minutes
 model.dt = pyo.Param(initialize=dt)
 
 # ---- Parameters ----
 
-pv = PVModule(time_horizon=time_horizon, start_point=2, radiation=radiation, area=25.0, beta=30.0, eta_noct=0.15)
-pv_data = pv.p_el_supply
+# pv = PVModule(time_horizon=time_horizon, start_point=1, radiation=radiation, area=25.0, beta=30.0, eta_noct=0.15)
+pv_data = irradiance
 # Example: PV supply for each building and time (assuming same PV for all buildings)
-pv_supplies = {(b, t): pv.p_el_supply[t] for b in range(n_buildings) for t in range(time_horizon)}
+pv_supplies = {(b, t): irradiance[t] for b in range(n_buildings) for t in range(time_horizon)}
 model.pv_supply = pyo.Param(model.buildings, model.t, initialize=pv_supplies)
 
 # Now, define variables indexed by building and time
@@ -66,7 +76,11 @@ model.discharge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initi
 model.soc = pyo.Var(model.buildings, model.t, bounds=(0, battery_capacity), initialize=initial_soc)
 model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 model.electric_load = pyo.Param(
-    model.buildings, model.t, initialize={(b, t): float(electric_load[t]) for b in model.buildings for t in model.t}
+    model.buildings,
+    model.t,
+    initialize={
+        (b, t): float(data["building 62 electricity consumption"].values[t]) for b in model.buildings for t in model.t
+    },
 )
 
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
@@ -77,18 +91,34 @@ model.q_heat_vars = pyo.Var(model.buildings, model.t, bounds=(0, None), initiali
 model.cop = pyo.Var(model.buildings, model.t, bounds=(1, None), initialize=2.2)
 model.f = pyo.Var(model.buildings, model.t, bounds=(0, 1), initialize=0.5)
 model.T_out = pyo.Param(
-    model.buildings, model.t, initialize={(b, t): outdoor_temperature[t] for b in model.buildings for t in model.t}
+    model.buildings,
+    model.t,
+    initialize={(b, t): data["outdoor temperature"].values[t] for b in model.buildings for t in model.t},
 )
+print(data["outdoor temperature"])
 model.q_heat = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=0)
 model.C = pyo.Param(model.buildings, initialize={b: 10 for b in model.buildings})  # Example value, replace with actual
 model.U = pyo.Param(model.buildings, initialize={b: 0.5 for b in model.buildings})
 model.T_in = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=T_init)
 model.T_set = pyo.Param(
-    model.buildings, model.t, initialize={(b, t): temperature_setpoint[t] for b in model.buildings for t in model.t}
+    model.buildings,
+    model.t,
+    initialize={(b, t): data["temperature setpoint"].values[t] for b in model.buildings for t in model.t},
 )
 # Boiler
 model.gas_consumption = pyo.Var(model.buildings, model.t, domain=pyo.Reals, bounds=(0, None), initialize=0)
 model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_power), initialize=0)
+
+
+### Plot Demand ###
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=data["time"], y=data["building 62 electricity consumption"], name="Setpoint (°C)"))
+fig.add_trace(go.Scatter(x=data["time"], y=irradiance, name="PV Supply (kW)"))
+
+fig.update_xaxes(title_text="Time")
+fig.update_yaxes(title_text="Power (kW)")
+fig.show()
 
 
 for b in model.buildings:
@@ -133,7 +163,7 @@ for b in model.buildings:
             return (
                 model.soc[b, t]
                 == model.soc[b, t - 1]
-                + (eta_charge * model.charge[b, t] - (1.0 / eta_discharge) * model.discharge[b, t]) * 1
+                + (eta_charge * model.charge[b, t] - (1.0 / eta_discharge) * model.discharge[b, t]) * model.dt
             )
 
     def gas_consumption_rule(model, b, t):
@@ -211,9 +241,9 @@ model.thermal_inertia = pyo.Constraint(
 
 def objective(model):
     return sum(
-        price[t] * model.p_el_vars[b, t] * model.dt
-        + gas_price * model.gas_consumption[b, t] * model.dt
-        + 100 * (model.T_in[b, t] - model.T_set[b, t]) ** 2
+        data["price"][t] * model.p_el_vars[b, t] * model.dt
+        + gas_price / 100 * model.gas_consumption[b, t] * model.dt
+        + 1 * (model.T_in[b, t] - model.T_set[b, t]) ** 2
         for b in model.buildings
         for t in model.t
     )
@@ -266,7 +296,7 @@ for b in model.buildings:
 
     # Electricity & Gas costs
     elec_cost_b_schedule = [
-        price[t]
+        data["price"].values[t]
         * (
             pyo.value(model.p_hp[b, t])
             + pyo.value(model.charge[b, t])
@@ -386,7 +416,13 @@ for b in model.buildings:
 
     # Electricity price (Column 3)
     fig.add_trace(
-        go.Scatter(y=price, mode="lines", name="Electricity Price", line=dict(color="pink"), showlegend=(b == 0)),
+        go.Scatter(
+            y=data["price"].values,
+            mode="lines",
+            name="Electricity Price (£/kWh)",
+            line=dict(color="pink"),
+            showlegend=(b == 0),
+        ),
         row=row,
         col=3,
     )
@@ -401,6 +437,7 @@ for b in model.buildings:
         row=row,
         col=3,
     )
+    fig.add_trace(go.Scatter(y=data["pv"].values, name="PV Supply (kWh)"), row=row, col=3)
     # fig.add_trace(
     #     go.Scatter(
     #         y=gas_cost_b_schedule,

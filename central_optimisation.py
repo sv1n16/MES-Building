@@ -18,7 +18,7 @@ from pyomo.util.infeasible import log_infeasible_constraints
 # Load data
 radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 load = pd.read_csv("data\\load.csv").values.flatten()
-price = pd.read_csv("data\\price.csv").values.flatten()
+price = pd.read_csv("data\\price.csv").values.flatten() / 100.0  # convert p/kWh -> £/kWh
 heatload = pd.read_csv("data\\heat_load.csv").values.flatten()
 temperature_setpoint = [17, 17, 17.5, 17.5, 17.5, 17.5, 20, 20, 20, 20, 18, 18]
 outdoor_temperature = [6.0, 6.17, 6.67, 7.46, 8.5, 9.71, 11.0, 12.29, 13.5, 14.54, 15.33, 15.83]
@@ -34,6 +34,8 @@ comfort_weight = 10
 model = pyo.ConcreteModel()
 model.t = pyo.RangeSet(0, time_horizon - 1)
 
+# Add: make comfort weight mutable on the model so we can vary it in a loop
+model.comfort_weight = pyo.Param(initialize=comfort_weight, mutable=True)
 
 building_parameters = {
     "battery": {
@@ -82,7 +84,7 @@ bd = Building(
     T_out=outdoor_temperature,
     T_init=initial_temp,
     T_set=temperature_setpoint,
-    **building_parameters
+    **building_parameters,
 )
 
 model = bd.get_model()
@@ -100,7 +102,7 @@ def objective(model):
     return sum(
         price[t] * (load[t] - pv.p_el_supply[t] + model.charge[t] - model.discharge[t] + model.p_el_vars[t]) * delta_t
         + boiler.gas_price * model.gas_consumption[t] * delta_t
-        + comfort_weight * (model.T_in[t] - model.T_set[t]) ** 2
+        + model.comfort_weight * (model.T_in[t] - model.T_set[t]) ** 2
         for t in model.t
     )
 
@@ -109,44 +111,79 @@ model.obj = pyo.Objective(rule=objective, sense=pyo.minimize)
 
 
 solver = pyo.SolverFactory("gurobi_direct")
-result = solver.solve(model, tee=True, logfile="Results/Temp_setpoint/solver_log.txt")
 
-log_infeasible_constraints(model)
-# Extract results
-charge_schedule = [pyo.value(model.charge[t]) for t in model.t]
-discharge_schedule = [pyo.value(model.discharge[t]) for t in model.t]
-soc_schedule = [pyo.value(model.soc[t]) for t in model.t]
+# Replace single solve with a loop over comfort weights to collect cost vs temperature deviation
+# include 0 and log-spaced weights between 1e-3 and 1e2 (more density between 0 and 1)
+weights = np.unique(np.concatenate(([0.0], np.logspace(-3, 2, num=50))))
+weights = np.sort(weights).tolist()
+summary_results = []
 
-# Debug: Print results
-print("Optimized charging schedule:", charge_schedule)
-print("Optimized discharging schedule:", discharge_schedule)
-print("Optimized SOC schedule:", soc_schedule)
+for w in weights:
+    model.comfort_weight = w  # update mutable param
+    result = solver.solve(model, tee=False)  # quieter solve
+    log_infeasible_constraints(model)
 
-components[0].p_el_charge_schedule = charge_schedule
-components[0].p_el_discharge_schedule = discharge_schedule
-components[0].energy_el_schedule = soc_schedule
-components[0].power_el_schedule = np.array(charge_schedule) - np.array(discharge_schedule)
-hp_thermal_output = -np.array([pyo.value(model.q_heat_vars[t]) for t in model.t])
-hp_electric_consumption = [pyo.value(model.p_el_vars[t]) for t in model.t]
-indoor_temperature = [pyo.value(model.T_in[t]) for t in model.t]
+    # Extract results after solve
+    charge_schedule = [pyo.value(model.charge[t]) for t in model.t]
+    discharge_schedule = [pyo.value(model.discharge[t]) for t in model.t]
+    soc_schedule = [pyo.value(model.soc[t]) for t in model.t]
 
-bd.p_el_schedule = load + charge_schedule - discharge_schedule - pv.p_el_supply + hp_electric_consumption
+    components[0].p_el_charge_schedule = charge_schedule
+    components[0].p_el_discharge_schedule = discharge_schedule
+    components[0].energy_el_schedule = soc_schedule
+    components[0].power_el_schedule = np.array(charge_schedule) - np.array(discharge_schedule)
+    hp_thermal_output = -np.array([pyo.value(model.q_heat_vars[t]) for t in model.t])
+    hp_electric_consumption = [pyo.value(model.p_el_vars[t]) for t in model.t]
+    indoor_temperature = [pyo.value(model.T_in[t]) for t in model.t]
 
-# hp_on_schedule = [pyo.value(model.hp_on[t]) for t in model.t]
-# boiler_on_schedule = [pyo.value(model.boiler_on[t]) for t in model.t]
-boiler_thermal_output = -np.array([pyo.value(model.q_boiler_vars[t]) for t in model.t])
-boiler_gas_consumption = [pyo.value(model.gas_consumption[t]) for t in model.t]
-thermal_load_setpoint = [pyo.value(model.q_heat[t]) for t in model.t]
-# # Calculate costs
-costs = np.array([price[t] * bd.p_el_schedule[t] for t in range(time_horizon)])
+    bd.p_el_schedule = load + charge_schedule - discharge_schedule - pv.p_el_supply + hp_electric_consumption
 
-# Calculate the cost at each time step
-costs = np.array([price[t] * bd.p_el_schedule[t] for t in range(time_horizon)])
-gas_costs = np.array(boiler_gas_consumption) * boiler.gas_price
-print("Electricity Costs:", sum(costs))
-print("Gas Costs:", sum(gas_costs))
-total_costs = costs + gas_costs
-print("Total costs (electricity + gas):", sum(total_costs))
+    boiler_thermal_output = -np.array([pyo.value(model.q_boiler_vars[t]) for t in model.t])
+    boiler_gas_consumption = [pyo.value(model.gas_consumption[t]) for t in model.t]
+    thermal_load_setpoint = [pyo.value(model.q_heat[t]) for t in model.t]
+
+    # Costs
+    costs = np.array([price[t] * bd.p_el_schedule[t] for t in range(time_horizon)])
+    gas_costs = np.array(boiler_gas_consumption) * boiler.gas_price
+    total_cost = float(costs.sum() + gas_costs.sum())
+
+    # Average temperature deviation (absolute)
+    avg_temp_deviation = float(np.mean(np.abs(np.array(indoor_temperature) - np.array(temperature_setpoint))))
+
+    summary_results.append({"weight": w, "total_cost": total_cost, "avg_temp_deviation": avg_temp_deviation})
+
+    print(f"weight={w}: total_cost={total_cost:.2f}, avg_temp_dev={avg_temp_deviation:.3f}")
+
+# Save summary to JSON
+with open("Results/schedules/cost_vs_temp_deviation_summary.json", "w") as f:
+    json.dump(summary_results, f, indent=2)
+
+# Create new plot: Cost vs Temperature Deviation (for different comfort weights)
+deviations = [r["avg_temp_deviation"] for r in summary_results]
+total_costs_list = [r["total_cost"] for r in summary_results]
+# Format labels compactly (scientific notation for small weights)
+labels = [f"{r['weight']:.3g}" for r in summary_results]
+
+fig2 = go.Figure()
+fig2.add_trace(
+    go.Scatter(
+        x=deviations,
+        y=total_costs_list,
+        mode="lines+markers",
+        text=labels,
+        hovertemplate="weight=%{text}<br>dev=%{x:.3f}<br>cost=%{y:.2f}<extra></extra>",
+        name="Cost vs Temp Dev",
+    )
+)
+fig2.update_layout(
+    title="Cost vs Average Temperature Deviation for different comfort_weight",
+    xaxis_title="Average Temperature Deviation (°C)",
+    yaxis_title="Total Cost (£)",
+    height=500,
+    width=700,
+)
+fig2.write_html("Results/schedules/cost_vs_temp_deviation.html")
+fig2.show()
 
 
 output_data = {
@@ -169,7 +206,7 @@ output_data = {
     "electricity_price": price.tolist(),
     "electricity_costs": costs.tolist(),
     "gas_costs": gas_costs.tolist(),
-    "total_costs": total_costs.tolist(),
+    "total_costs": total_costs_list,
 }
 
 with open("Results/schedules/central_optimisation_schedules_and_costs.json", "w") as f:
@@ -213,7 +250,7 @@ fig.add_trace(
 )
 fig.add_trace(
     go.Scatter(
-        x=plot_time, y=price.tolist() if hasattr(price, "tolist") else price, name="Energy Market Price (ct/kWh)"
+        x=plot_time, y=price.tolist() if hasattr(price, "tolist") else price, name="Energy Market Price (£/kWh)"
     ),
     row=6,
     col=1,
@@ -241,7 +278,7 @@ fig.update_yaxes(title_text="Charge/Discharge (kW)", row=2, col=1)
 fig.update_yaxes(title_text="Import/Export (kW)", row=3, col=1)
 fig.update_yaxes(title_text="PV Export (kW)", row=4, col=1)
 fig.update_yaxes(title_text="Load (kW)", row=5, col=1)
-fig.update_yaxes(title_text="Price (p/kWh)", row=6, col=1)
+fig.update_yaxes(title_text="Price (£/kWh)", row=6, col=1)
 fig.update_yaxes(title_text="PV Supply (kWh)", row=7, col=1)
 fig.update_yaxes(title_text="Total Cost (£)", row=8, col=1)
 
