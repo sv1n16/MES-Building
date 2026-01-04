@@ -18,7 +18,7 @@ from pyomo.util.infeasible import log_infeasible_constraints
 # Load data
 radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 electric_load = pd.read_csv("data\\load.csv").values.flatten()
-price = pd.read_csv("data\\price.csv").values.flatten()
+price = pd.read_csv("data\\price.csv").values.flatten() / 100.0  # convert p/kWh -> £/kWh
 heatload = pd.read_csv("data\\heat_load.csv").values.flatten()
 temperature_setpoint = [17, 17, 17.5, 17.5, 17.5, 17.5, 20, 20, 20, 20, 18, 18]
 outdoor_temperature = [6.0, 6.17, 6.67, 7.46, 8.5, 9.71, 11.0, 12.29, 13.5, 14.54, 15.33, 15.83]

@@ -25,7 +25,7 @@ time_horizon = 12  # 24 hours
 delta_t = 1  # 1 hour time step
 radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 load = pd.read_csv("data\\load.csv").values.flatten()
-price = pd.read_csv("data\\price.csv").values.flatten()
+price = pd.read_csv("data\\price.csv").values.flatten() / 100.0  # convert p/kWh -> £/kWh
 heat_load = pd.read_csv("data\\heat_load.csv").values.flatten()
 
 bat = Battery(p_el_demand=p_el_charge, p_el_supply=p_el_discharge)

@@ -14,6 +14,7 @@ from src.Classes.heatpump import HeatPump
 
 from pyomo.util.infeasible import log_infeasible_constraints
 import pyomo.environ as pyo
+import sys
 
 model = pyo.ConcreteModel()
 
@@ -30,35 +31,62 @@ model = pyo.ConcreteModel()
 
 data = pd.read_csv("data\\processed_data_2018_02_21.csv")
 data.columns = data.columns.str.strip().str.lower()
-print(data.columns)
-# Convert electricity price from p/kWh to £/kWh
+cols = data.columns[data.columns.str.contains("consumption", case=False)]
+cols = cols[1:5]  # all building consumption columns
 if "price" in data.columns:
     data["price"] = data["price"] / 100.0
+
+# --- create hour index ---
+data["hour"] = data.index // 60
+
+# --- aggregate ---
+data_hr = pd.DataFrame()
+# price is already converted from p/kWh to £/kWh above; do NOT divide by 100 again
+data_hr["price"] = data.groupby("hour")["price"].mean()
+data_hr["pv"] = data.groupby("hour")["pv"].mean()
+data_hr["outdoor temperature"] = data.groupby("hour")["outdoor temperature"].mean()
+data_hr["temperature setpoint"] = data.groupby("hour")["temperature setpoint"].mean()
+
+for c in cols:
+    data_hr[c] = data.groupby("hour")[c].mean()
+
+# Convert electricity price from p/kWh to £/kWh
+
+print("[sanity] price range (hourly) £/kWh:", data_hr["price"].min(), data_hr["price"].max())
+print("[sanity] pv min/max (kW):", data_hr["pv"].min(), data_hr["pv"].max())
+for c in cols:
+    print(f"[sanity] load '{c}' min/max (kW):", data_hr[c].min(), data_hr[c].max())
+print(
+    "[sanity] temperature setpoint min/max (°C):",
+    data_hr["temperature setpoint"].min(),
+    data_hr["temperature setpoint"].max(),
+)
+data = data_hr
 
 irradiance = data["pv"].values.flatten()
 # Parameters
 time_horizon = int(len(data))  # Number of hours in the time horizon
-print(time_horizon)
-delta_t = 1  # Time step in hours
+# Time step (explicit units): hours. Set dt_hours=1.0 for hourly timesteps,
+# or dt_hours = 1.0/60.0 for 1-minute timesteps (in hours).
+
 battery_capacity = 12  # kWh
 max_power = 4.6  # kW
-initial_soc = 0.1 * battery_capacity  # kWh
 eta_charge = 0.9  # Charging efficiency
 eta_discharge = 0.9
-n_buildings = 1
+n_buildings = len(cols)  # Number of buildings
 p_th_nom = 12
 T_ref = 7
 cop = np.ones(time_horizon) * 2.18
-T_init = 15
+T_init = 20
 max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
-gas_price = 5  # Gas price (p/kWh)
+gas_price = 1  # Gas price (p/kWh)
 # ---- Sets ----
 model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
-dt = 60  # minutes
+dt = 1  # 60  # minutes
 model.dt = pyo.Param(initialize=dt)
-
+alpha = 1000
 # ---- Parameters ----
 
 # pv = PVModule(time_horizon=time_horizon, start_point=1, radiation=radiation, area=25.0, beta=30.0, eta_noct=0.15)
@@ -73,14 +101,21 @@ model.pv_supply = pyo.Param(model.buildings, model.t, initialize=pv_supplies)
 
 model.charge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initialize=0)
 model.discharge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initialize=0)
-model.soc = pyo.Var(model.buildings, model.t, bounds=(0, battery_capacity), initialize=initial_soc)
+## Initial SOC: random values between 0 and 1 (fractions) for each building,
+## converted to kWh by multiplying by battery_capacity
+initial_soc_frac = np.random.rand(n_buildings)
+initial_soc = [float(f * battery_capacity) for f in initial_soc_frac]
+print("[sanity] initial SOC fractions:", initial_soc_frac)
+print("[sanity] initial SOC (kWh):", initial_soc)
+
+model.soc = pyo.Var(
+    model.buildings, model.t, bounds=(0, battery_capacity), initialize={(b): initial_soc[b] for b in model.buildings}
+)
 model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 model.electric_load = pyo.Param(
     model.buildings,
     model.t,
-    initialize={
-        (b, t): float(data["building 62 electricity consumption"].values[t]) for b in model.buildings for t in model.t
-    },
+    initialize={(b, t): float(data[cols[b]].values[t]) for b in model.buildings for t in model.t},
 )
 
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
@@ -95,7 +130,6 @@ model.T_out = pyo.Param(
     model.t,
     initialize={(b, t): data["outdoor temperature"].values[t] for b in model.buildings for t in model.t},
 )
-print(data["outdoor temperature"])
 model.q_heat = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=0)
 model.C = pyo.Param(model.buildings, initialize={b: 10 for b in model.buildings})  # Example value, replace with actual
 model.U = pyo.Param(model.buildings, initialize={b: 0.5 for b in model.buildings})
@@ -113,8 +147,10 @@ model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_p
 ### Plot Demand ###
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=data["time"], y=data["building 62 electricity consumption"], name="Setpoint (°C)"))
-fig.add_trace(go.Scatter(x=data["time"], y=irradiance, name="PV Supply (kW)"))
+for col in cols:
+    fig.add_trace(go.Scatter(x=data.index, y=data[col], name="Consumption (kW)"))
+    fig.add_trace(go.Scatter(x=data.index, y=irradiance, name="PV Supply (kW)"))
+
 
 fig.update_xaxes(title_text="Time")
 fig.update_yaxes(title_text="Power (kW)")
@@ -158,7 +194,7 @@ for b in model.buildings:
 
     def soc_rule(model, b, t):
         if t == 0:
-            return model.soc[b, t] == initial_soc
+            return model.soc[b, t] == initial_soc[b]
         else:
             return (
                 model.soc[b, t]
@@ -228,7 +264,7 @@ def thermal_dynamics(
     if t == 0:
         return model.T_in[b, t] == T_init
     return model.T_in[b, t] == model.T_in[b, t - 1] + model.dt / model.C[b] * (
-        model.q_heat[b, t] - model.U[b] * (model.T_in[b, t - 1] - model.T_out[b, t])
+        (model.q_heat[b, t]) - model.U[b] * (model.T_in[b, t - 1] - model.T_out[b, t])
     )
 
 
@@ -239,11 +275,22 @@ model.thermal_inertia = pyo.Constraint(
 )
 
 
+def temp_dev_lower_rule(model, b, t):
+    return model.T_in[b, t] >= model.T_set[b, t] - 0.5
+
+
+def temp_dev_high_rule(model, b, t):
+    return model.T_in[b, t] <= model.T_set[b, t] + 2.0
+
+
+model.temp_dev_lower = pyo.Constraint(model.buildings, model.t, rule=temp_dev_lower_rule)
+
+
 def objective(model):
     return sum(
         data["price"][t] * model.p_el_vars[b, t] * model.dt
         + gas_price / 100 * model.gas_consumption[b, t] * model.dt
-        + 1 * (model.T_in[b, t] - model.T_set[b, t]) ** 2
+        + 1000 * (model.T_in[b, t] - model.T_set[b, t]) ** 2
         for b in model.buildings
         for t in model.t
     )
@@ -291,7 +338,6 @@ fig = make_subplots(
 )
 
 for b in model.buildings:
-    print(b)
     row = b + 1
 
     # Electricity & Gas costs
@@ -304,12 +350,13 @@ for b in model.buildings:
             - pyo.value(model.pv_supply[b, t])
             + model.electric_load[b, t]
         )
-        * delta_t
+        * 1
         for t in model.t
     ]
 
     elec_cost_b = sum(elec_cost_b_schedule)
-    gas_cost_b_schedule = [gas_price * pyo.value(model.gas_consumption[b, t]) * delta_t for t in model.t]
+    # gas_price is in p/kWh so convert to £/kWh by dividing by 100
+    gas_cost_b_schedule = [gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) * model.dt for t in model.t]
     gas_cost_b = sum(gas_cost_b_schedule)
 
     total_b = elec_cost_b + gas_cost_b
@@ -437,18 +484,17 @@ for b in model.buildings:
         row=row,
         col=3,
     )
-    fig.add_trace(go.Scatter(y=data["pv"].values, name="PV Supply (kWh)"), row=row, col=3)
-    # fig.add_trace(
-    #     go.Scatter(
-    #         y=gas_cost_b_schedule,
-    #         mode="lines",
-    #         name="Gas Consumption Cost",
-    #         line=dict(color="brown"),
-    #         showlegend=(b == 0),
-    #     ),
-    #     row=row,
-    #     col=3,
-    # )
+    fig.add_trace(
+        go.Scatter(
+            y=gas_cost_b_schedule,
+            mode="lines",
+            name="Gas Consumption Cost",
+            line=dict(color="brown"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=3,
+    )
     # Axis labels
     fig.update_xaxes(title_text="Time", row=row, col=1)
     fig.update_yaxes(title_text="Power/Energy (kW/kWh)", title_font=dict(size=10), row=row, col=1)
