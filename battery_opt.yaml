@@ -1,0 +1,197 @@
+name: battery optimization
+objective: min
+
+domains:
+  charge_action:
+    values  : [0 ... 4.6]
+    type   : non_semantic
+    initial_value: 0
+
+  discharge_action:
+    values  : [0 ... 4.6]
+    type   : non_semantic
+    initial_value: 0
+
+  soc_domain:
+    values  : [0 ... 12]
+    type   : non_semantic
+    initial_value: 5
+
+  load:
+    type: non_semantic
+    values: [1,2,3,4,5,6,7,8,9,10,11,12]
+
+
+variables:
+  # Charge and discharge for building 1
+  charge_1:
+    domain: charge_action
+    agent: building_1
+    initial_value: 0
+
+  discharge_1:
+    domain: discharge_action
+    agent: building_1
+    initial_value: 0
+
+  # Charge and discharge for building 2
+  charge_2:
+    domain: charge_action
+    agent: building_2
+    initial_value: 0
+
+  discharge_2:
+    domain: discharge_action
+    agent: building_2
+    initial_value: 0
+
+  # State of charge variables
+  soc_1:
+    domain: soc_domain
+    agent: building_1
+    initial_value: 5
+
+  soc_2:
+    domain: soc_domain
+    agent: building_2
+    initial_value: 9
+
+  soc_1_prev:
+    domain: soc_domain
+    external: True
+    initial_value: 0
+    
+  soc_2_prev:
+    domain: soc_domain
+    external: True
+    initial_value: 0
+
+external_variables:
+  # Previous timestep SOC values
+  load_b1:
+    domain: load
+    external: True
+    initial_value: 1
+
+constraints:
+
+  # ========= STATE OF CHARGE DYNAMICS CONSTRAINTS ==========
+  # soc(t) = soc(t-1) + eta_charge * charge(t) - (1/eta_discharge) * discharge(t)
+  # With eta_charge = 0.9, eta_discharge = 0.9
+  
+  soc_1_dynamics:
+    type: hard
+    function: |
+      def soc_dynamics(soc_1, soc_1_prev, charge_1, discharge_1):
+          eta_charge = 0.9
+          eta_discharge = 0.9
+          expected_soc = soc_1_prev + (eta_charge * charge_1 - (1.0 / eta_discharge) * discharge_1)
+          # Return 0 if constraint is satisfied, high penalty otherwise
+          error = abs(soc_1 - expected_soc)
+          if error < 0.01:  # Allow small numerical tolerance
+              return 0
+          else:
+              return 1000000 * error
+    variables: [soc_1, soc_1_prev, charge_1, discharge_1]
+
+  soc_2_dynamics:
+    type: hard
+    function: |
+      def soc_dynamics(soc_2, soc_2_prev, charge_2, discharge_2):
+          eta_charge = 0.9
+          eta_discharge = 0.9
+          # SOC balance: soc(t) = soc(t-1) + charge_effect - discharge_effect
+          expected_soc = soc_2_prev + (eta_charge * charge_2 - (1.0 / eta_discharge) * discharge_2)
+          # Return 0 if constraint is satisfied, high penalty otherwise
+          error = abs(soc_2 - expected_soc)
+          if error < 0.01:  # Allow small numerical tolerance
+              return 0
+          else:
+              return 1000000 * error
+    variables: [soc_2, soc_2_prev, charge_2, discharge_2]
+
+  # ========= BOUNDARY CONSTRAINTS ==========
+  
+  soc_1_boundaries:
+    type: intention
+    function: |
+      def soc_bounds(soc_1):
+          # Penalty if SOC is outside valid range [0, 12]
+          if soc_1 < 0 or soc_1 > 12:
+              return 1000000
+          else:
+              return 0
+    variables: [soc_1]
+
+  soc_2_boundaries:
+    type: intention
+    function: |
+      def soc_bounds(soc_2):
+          # Penalty if SOC is outside valid range [0, 12]
+          if soc_2 < 0 or soc_2 > 12:
+              return 1000000
+          else:
+              return 0
+    variables: [soc_2]
+
+  # ========= OPERATIONAL CONSTRAINTS ==========
+  
+  charge_discharge_exclusivity_1:
+    type: intention
+    function: |
+      def exclusivity(charge_1, discharge_1):
+          # Cannot charge and discharge simultaneously
+          if charge_1 > 0.1 and discharge_1 > 0.1:
+              return 1000000
+          else:
+              return 0
+    variables: [charge_1, discharge_1]
+
+  charge_discharge_exclusivity_2:
+    type: intention
+    function: |
+      def exclusivity(charge_2, discharge_2):
+          # Cannot charge and discharge simultaneously
+          if charge_2 > 0.1 and discharge_2 > 0.1:
+              return 1000000
+          else:
+              return 0
+    variables: [charge_2, discharge_2]
+
+  # ========= OBJECTIVE FUNCTIONS ==========
+  
+  cost:
+    type: intention
+    function: |
+      def cost_fn(charge_1, discharge_1, charge_2, discharge_2):
+          # Minimize cost of electricity used (charge action)
+          # Discharge brings revenue (negative cost)
+          cost = 0.25 * (charge_1 + charge_2 - 0.5 * (discharge_1 + discharge_2))
+          return cost
+    variables: [charge_1, discharge_1, charge_2, discharge_2]
+
+  peak_load:
+    type: intention
+    function: |
+      def peak_reduction(charge_1, discharge_1, charge_2, discharge_2):
+          # Minimize squared net power to reduce peaks
+          net_power_1 = charge_1 - discharge_1
+          net_power_2 = charge_2 - discharge_2
+          return (net_power_1 + net_power_2) ** 2
+    variables: [charge_1, discharge_1, charge_2, discharge_2]
+
+  load_balance:
+    type: intention
+    function: |
+      def load_check(load_b1, charge_1, charge_2):
+          # Ensure sufficient power for demand
+          available_power = 20  # Assumed available from grid
+          total_demand = load_b1 + charge_1 + charge_2
+          if total_demand > available_power:
+              return 1000000 * (total_demand - available_power)
+          else:
+              return 0
+    variables: [load_b1, charge_1, charge_2]
+agents: [building_1, building_2]
+
+

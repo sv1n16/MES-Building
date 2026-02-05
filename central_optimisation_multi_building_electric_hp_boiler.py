@@ -55,9 +55,9 @@ for c in cols:
 print("[sanity] price range (hourly) £/kWh:", data_hr["price"].min(), data_hr["price"].max())
 print("[sanity] pv min/max (kW):", data_hr["pv"].min(), data_hr["pv"].max())
 for c in cols:
-    print(f"[sanity] load '{c}' min/max (kW):", data_hr[c].min(), data_hr[c].max())
+    print(f"[sanity] load '{c}' min/max (kW): total (kW): ", data_hr[c].min(), data_hr[c].max(), sum(data_hr[c]))
 print(
-    "[sanity] temperature setpoint min/max (°C):",
+    "temperature setpoint min/max (°C):",
     data_hr["temperature setpoint"].min(),
     data_hr["temperature setpoint"].max(),
 )
@@ -115,7 +115,7 @@ model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 model.electric_load = pyo.Param(
     model.buildings,
     model.t,
-    initialize={(b, t): float(data[cols[b]].values[t]) for b in model.buildings for t in model.t},
+    initialize={(b, t): float(data[cols[b]].values[t] * 100) for b in model.buildings for t in model.t},
 )
 
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
@@ -148,8 +148,9 @@ model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_p
 
 fig = go.Figure()
 for col in cols:
-    fig.add_trace(go.Scatter(x=data.index, y=data[col], name="Consumption (kW)"))
-    fig.add_trace(go.Scatter(x=data.index, y=irradiance, name="PV Supply (kW)"))
+    print(f"[sanity] plotting consumption for column: {col}", sum(data[col]))
+    fig.add_trace(go.Scatter(x=data.index, y=data[col], name=f"Consumption (kW) {col}"))
+    # fig.add_trace(go.Scatter(x=data.index, y=irradiance, name="PV Supply (kW)"))
 
 
 fig.update_xaxes(title_text="Time")
@@ -366,7 +367,9 @@ for b in model.buildings:
 
     # Energy variables (Column 1)
     fig.add_trace(
-        go.Scatter(y=load_schedule[b], mode="lines", name="Load (kW)", line=dict(color="black"), showlegend=(b == 0)),
+        go.Scatter(
+            y=load_schedule[b], mode="lines", name=f"Load (kW) {b}", line=dict(color="black"), showlegend=(b == 0)
+        ),
         row=row,
         col=1,
     )

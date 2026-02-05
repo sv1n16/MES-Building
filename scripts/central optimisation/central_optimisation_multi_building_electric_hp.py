@@ -135,7 +135,7 @@ for b in model.buildings:
             return (
                 model.soc[b, t]
                 == model.soc[b, t - 1]
-                + (eta_charge * model.charge[b, t] - (1.0 / eta_discharge) * model.discharge[b, t]) * model.dt
+                + (eta_charge * model.charge[b, t] - (1.0 / eta_discharge) * model.discharge[b, t]) * 1
             )
 
     if constr_name_charge in model.component_map(pyo.Constraint):

@@ -1,20 +1,20 @@
 # from networkx import display
 import pandas as pd
 
-# irradiance = pd.read_excel("data\\Irradiance_2018_02_21.xlsx")
-# irradiance = irradiance.iloc[1:, :]
+irradiance = pd.read_excel("data\\Irradiance_2018_02_21.xlsx")
+irradiance = irradiance.iloc[1:, :]
 
-# # ensure numeric minutes
-# irradiance["Irradiances"] = pd.to_numeric(irradiance["Irradiances"])
+# ensure numeric minutes
+irradiance["Irradiances"] = pd.to_numeric(irradiance["Irradiances"])
 
-# base_date = pd.Timestamp("2018-02-18")
+base_date = pd.Timestamp("2018-02-18")
 
-# irradiance["time"] = base_date + pd.to_timedelta(irradiance["Irradiances"], unit="m")
+irradiance["time"] = base_date + pd.to_timedelta(irradiance["Irradiances"], unit="m")
 
-# # format only at the end (optional)
-# irradiance["time"] = irradiance["time"].dt.strftime("%d-%m-%Y %H:%M")
-# irradiance["PV"] = irradiance["PV"] / 1000  # assuming PV column exists
-# irradiance.to_csv("data\\Irradiance_2018_02_21.csv", index=False)
+# format only at the end (optional)
+irradiance["time"] = irradiance["time"].dt.strftime("%d-%m-%Y %H:%M")
+irradiance["PV"] = irradiance["PV"] / 1000  # assuming PV column exists
+irradiance.to_csv("data\\Irradiance_2018_02_21.csv", index=False)
 
 
 # price = pd.read_csv("data\\electricity_price_uk_dec_2025.csv")
