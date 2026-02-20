@@ -117,7 +117,7 @@ solver = pyo.SolverFactory("gurobi_direct")
 weights = np.unique(np.concatenate(([0.0], np.logspace(-3, 2, num=50))))
 weights = np.sort(weights).tolist()
 summary_results = []
-
+weights = [0]
 for w in weights:
     model.comfort_weight = w  # update mutable param
     result = solver.solve(model, tee=False)  # quieter solve
