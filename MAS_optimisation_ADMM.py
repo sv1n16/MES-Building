@@ -18,7 +18,7 @@ cols = data.columns[data.columns.str.contains("consumption", case=False)]
 consumption_data = data[cols]
 
 # Get top 3 column names by total consumption
-top3_consumers = consumption_data.sum().sort_values(ascending=False).head(10).index.tolist()
+top3_consumers = consumption_data.sum().sort_values(ascending=False).head(4).index.tolist()
 cols = top3_consumers  # all building consumption columns
 
 data["price"] = data["price (p/kwh)"] / 100.0
@@ -50,9 +50,9 @@ p_th_nom = 12
 T_ref = 7
 cop = np.ones(time_horizon) * 2.18
 T_init = 20.0
-max_thermal_power = 50.0  # kW
+max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
-gas_price = 5  # Gas price (p/kWh)
+gas_price = 10  # Gas price (p/kWh)
 hp_max_power = 10.0  # Maximum heat pump electrical power (kW)
 
 # ---- Sets ----
@@ -102,6 +102,9 @@ model.f = pyo.Var(model.buildings, model.t, bounds=(0, 1), initialize=0.5)
 model.q_heat = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=0)
 model.gas_consumption = pyo.Var(model.buildings, model.t, domain=pyo.Reals, bounds=(0, None), initialize=0)
 model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_power), initialize=0)
+
+# Peak gas consumption variable
+model.P_gas_peak = pyo.Var(bounds=(0, None))
 
 # Thermal variables
 model.T_in = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=T_init)
@@ -273,6 +276,14 @@ def peak_rule(model, t):
 
 
 model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
+
+
+# def peak_gas_rule(model, t):
+#     """Peak gas consumption limit"""
+#     return sum(model.gas_consumption[b, t] for b in model.buildings) <= model.P_gas_peak
+
+
+# model.peak_gas_constraint = pyo.Constraint(model.t, rule=peak_gas_rule)
 # ============================================================================
 # OBJECTIVE FUNCTION
 # ============================================================================
@@ -301,7 +312,8 @@ lam_py = np.zeros(time_horizon)
 def objective_rule(model):
     total_cost = 0
     for t in model.t:
-        total_cost += model.P_peak  # explicit peak minimization
+        total_cost += model.P_peak  # explicit peak electricity minimization
+        # total_cost += model.P_gas_peak  # explicit peak gas minimization
         for b in model.buildings:
             # energy costs
             total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
@@ -377,7 +389,7 @@ for k in range(max_iter):
 
 import matplotlib.pyplot as plt
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
 
 # Plot primal residual
 ax1.semilogy(iterations, primal_residuals, "b-o", linewidth=2, markersize=6, label="Primal Residual")
@@ -397,6 +409,16 @@ ax2.set_title("Dual Residual Convergence", fontsize=14, fontweight="bold")
 ax2.grid(True, alpha=0.3)
 ax2.legend(fontsize=11)
 
+# Combined plot to see trade-off
+ax3.semilogy(iterations, primal_residuals, "b-o", linewidth=2, markersize=6, label="Primal ||p - z||")
+ax3.semilogy(iterations, dual_residuals, "g-s", linewidth=2, markersize=6, label="Dual ρ||z - z_prev||")
+ax3.axhline(y=tol, color="r", linestyle="--", linewidth=2, label=f"Tolerance = {tol}")
+ax3.set_xlabel("Iteration", fontsize=12)
+ax3.set_ylabel("Residual Value (log scale)", fontsize=12)
+ax3.set_title("Primal vs Dual Residuals (Trade-off Check)", fontsize=14, fontweight="bold")
+ax3.grid(True, alpha=0.3)
+ax3.legend(fontsize=11)
+
 plt.tight_layout()
 plt.savefig("Results/ADMM_convergence.png", dpi=300, bbox_inches="tight")
 print("\nConvergence plot saved to Results/ADMM_convergence.png")
@@ -413,6 +435,30 @@ print(f"Initial dual residual: {dual_residuals[0]:.6e}")
 print(f"Final dual residual: {dual_residuals[-1]:.6e}")
 print(f"Tolerance: {tol}")
 print(f"Converged: {primal_residuals[-1] < tol and dual_residuals[-1] < tol}")
+
+# Trade-off analysis
+print(f"\n{'--- TRADE-OFF ANALYSIS ---'}")
+primal_reduction = (
+    (primal_residuals[0] - primal_residuals[-1]) / primal_residuals[0] * 100 if primal_residuals[0] > 0 else 0
+)
+dual_reduction = (dual_residuals[0] - dual_residuals[-1]) / dual_residuals[0] * 100 if dual_residuals[0] > 0 else 0
+print(f"Primal reduction: {primal_reduction:.1f}%")
+print(f"Dual reduction: {dual_reduction:.1f}%")
+print(f"Final primal/dual ratio: {primal_residuals[-1] / max(dual_residuals[-1], 1e-10):.2f} (>1 = primal worse)")
+
+# Check for trade-off pattern
+late_iterations = min(10, len(iterations) // 2)
+primal_change = primal_residuals[-1] - primal_residuals[-late_iterations]
+dual_change = dual_residuals[-1] - dual_residuals[-late_iterations]
+if primal_change > 0 and dual_change < 0:
+    print(f"⚠️  TRADE-OFF DETECTED: Primal increasing while dual decreasing (rho too high)")
+elif primal_change > 0.1 * primal_residuals[-late_iterations]:
+    print(f"✓ Primal plateaued (no consensus reached)")
+elif dual_change < 0 and primal_change < 0.01:
+    print(f"✓ Algorithm stable but consensus imperfect (normal for high rho)")
+else:
+    print(f"✓ Both residuals improving or stable")
+
 print(f"{'='*60}\n")
 
 # ============================================================================
@@ -618,4 +664,4 @@ for b in model.buildings:
     fig.update_xaxes(title_text="Time", row=row, col=3)
     fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
 
-# fig.show()
+fig.show()
