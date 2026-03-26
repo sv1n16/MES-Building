@@ -60,12 +60,11 @@ model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
 dt = 1.0
 model.dt = pyo.Param(initialize=dt)
-alpha = 0.5
-beta = 300.0  # Deadband penalty coefficient for lower bound violation (higher penalty)
-theta = 50.0  # Upper deadband penalty coefficient for upper bound violation
+alpha = 0.03
 
-# ---- Occupancy Model Parameters ----
-# Define binary occupancy model: 1 during peak hours and night, 0 between 9 AM and 4 PM
+# ---- Binary Occupancy Model ----
+# 1 during peak hours (night to 9 AM, 4 PM to midnight)
+# 0 during daytime (9 AM to 4 PM)
 occupancy_profile = {
     0: 1,  # 00:00-01:00 (night - occupied)
     1: 1,  # 01:00-02:00 (night - occupied)
@@ -94,24 +93,19 @@ occupancy_profile = {
 }
 
 # Temperature deadbands based on occupancy
-# Lower deadband (comfort threshold when occupied)
-# Upper deadband (comfort threshold for cooling)
-T_lower_nominal = 18.0  # Minimum comfort temperature when occupied
-T_upper_nominal = 24.0  # Maximum comfort temperature when occupied
 T_lower_unoccupied = 10.0  # Minimum acceptable when unoccupied
-T_upper_unoccupied = 20.0  # Maximum acceptable when unoccupied
+T_upper_unoccupied = 28.0  # Maximum acceptable when unoccupied
 
 # ---- Randomize Initial Building Temperatures ----
-# Generate random initial temperatures for each building within comfort range
-T_init_lower = 15  # 18.0°C
-T_init_upper = T_upper_nominal  # 24.0°C
+# Set fixed random seed for reproducibility in comparisons
+np.random.seed(42)
+T_init_lower = 18.0  # Lower bound for random initial temperature
+T_init_upper = 24.0  # Upper bound for random initial temperature
 initial_T_frac = np.random.rand(n_buildings)
 initial_T_in = [float(T_init_lower + f * (T_init_upper - T_init_lower)) for f in initial_T_frac]
-print(f"Initial building temperatures (randomized within {T_init_lower}-{T_init_upper}°C range):")
+print(f"Initial building temperatures (randomized within {T_init_lower}-{T_init_upper}C range):")
 for b in range(n_buildings):
-    print(f"  Building {b}: {initial_T_in[b]:.2f}°C")
-
-# ---- Parameters ----
+    print(f"  Building {b}: {initial_T_in[b]:.2f}C")
 
 irradiance = data_hr["pv"].values.flatten() / 1000
 pv_data = irradiance
@@ -160,14 +154,6 @@ model.T_in = pyo.Var(
     initialize=lambda m, b, t: initial_T_in[b] if t == 0 else T_init,
 )
 
-# Deadband slack variables for penalty calculation
-model.T_below_lower = pyo.Var(
-    model.buildings, model.t, bounds=(0, None), initialize=0
-)  # Temperature below lower bound
-model.T_above_upper = pyo.Var(
-    model.buildings, model.t, bounds=(0, None), initialize=0
-)  # Temperature above upper bound
-
 # ---- Parameters (Data) ----
 
 model.electric_load = pyo.Param(
@@ -191,33 +177,9 @@ model.T_set = pyo.Param(
 model.C = pyo.Param(model.buildings, initialize={b: 10 for b in model.buildings})
 model.U = pyo.Param(model.buildings, initialize={b: 0.5 for b in model.buildings})
 
-# Occupancy parameter
+# Occupancy parameter (binary: 1=occupied, 0=unoccupied)
 model.occupancy_profile = pyo.Param(
-    model.t, initialize={t: occupancy_profile.get(t % 24, 0.5) for t in range(time_horizon)}
-)
-
-# Temperature bounds based on occupancy
-# During occupied hours: T_set ± 1°C
-# During unoccupied hours: T_lower_unoccupied to T_upper_unoccupied
-model.T_lower_bound = pyo.Param(
-    model.buildings,
-    model.t,
-    initialize={
-        (b, t): (model.T_set[b, t] - 1.0) * model.occupancy_profile[t]
-        + T_lower_unoccupied * (1 - model.occupancy_profile[t])
-        for b in model.buildings
-        for t in model.t
-    },
-)
-model.T_upper_bound = pyo.Param(
-    model.buildings,
-    model.t,
-    initialize={
-        (b, t): (model.T_set[b, t] + 1.0) * model.occupancy_profile[t]
-        + T_upper_unoccupied * (1 - model.occupancy_profile[t])
-        for b in model.buildings
-        for t in model.t
-    },
+    model.t, initialize={t: occupancy_profile.get(t % 24, 0) for t in range(time_horizon)}
 )
 
 # ============================================================================
@@ -358,57 +320,17 @@ def thermal_dynamics_rule(model, b, t):
 model.thermal_dynamics = pyo.Constraint(model.buildings, model.t, rule=thermal_dynamics_rule)
 
 
-# ---- Deadband Slack Constraints ----
-def temperature_below_lower_rule_1(model, b, t):
-    """Slack variable for temperature below lower deadband - lower bound"""
-    return model.T_below_lower[b, t] >= 0
-
-
-def temperature_below_lower_rule_2(model, b, t):
-    """Slack variable for temperature below lower deadband - upper bound"""
-    return model.T_below_lower[b, t] >= model.T_lower_bound[b, t] - model.T_in[b, t]
-
-
-model.temperature_below_lower_1 = pyo.Constraint(model.buildings, model.t, rule=temperature_below_lower_rule_1)
-model.temperature_below_lower_2 = pyo.Constraint(model.buildings, model.t, rule=temperature_below_lower_rule_2)
-
-
-def temperature_above_upper_rule_1(model, b, t):
-    """Slack variable for temperature above upper deadband - lower bound"""
-    return model.T_above_upper[b, t] >= 0
-
-
-def temperature_above_upper_rule_2(model, b, t):
-    """Slack variable for temperature above upper deadband - upper bound"""
-    return model.T_above_upper[b, t] >= model.T_in[b, t] - model.T_upper_bound[b, t]
-
-
-model.temperature_above_upper_1 = pyo.Constraint(model.buildings, model.t, rule=temperature_above_upper_rule_1)
-model.temperature_above_upper_2 = pyo.Constraint(model.buildings, model.t, rule=temperature_above_upper_rule_2)
-
-
 # ============================================================================
 # OBJECTIVE FUNCTION
 # ============================================================================
 
 
 def objective_rule(model):
-    """Minimize total cost: electricity + gas + deadband penalty
-
-    Deadband penalty (weighted by occupancy):
-    occupancy⋅[c⋅max(0, T−Thigh)²+c⋅max(0, Tlow−T)²]
-    where:
-      Tlow = T_lower_bound (lower deadband threshold)
-      Thigh = T_upper_bound (upper deadband threshold)
-      c = beta, theta (penalty coefficients)
-      occupancy = occupancy_profile[t]
-    """
+    """Minimize total cost: electricity + gas + occupancy-weighted temperature deviation penalty"""
     return sum(
-        # Energy costs
         data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
         + gas_price / 100 * model.gas_consumption[b, t] * model.dt
-        # Deadband penalty (weighted by occupancy): occupancy⋅[β⋅max(0, Tlow−T)² + θ⋅max(0, T−Thigh)²]
-        + model.occupancy_profile[t] * (beta * model.T_below_lower[b, t] ** 2 + theta * model.T_above_upper[b, t] ** 2)
+        + model.occupancy_profile[t] * alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
         for b in model.buildings
         for t in model.t
     )
@@ -441,54 +363,9 @@ charging_state_schedule = np.array([[pyo.value(model.charging_state[b, t]) for t
 T_in = [[pyo.value(model.T_in[b, t]) for t in model.t] for b in model.buildings]
 T_out = [[pyo.value(model.T_out[b, t]) for t in model.t] for b in model.buildings]
 T_set = [[model.T_set[b, t] for t in model.t] for b in model.buildings]
-T_lower = [[model.T_lower_bound[b, t] for t in model.t] for b in model.buildings]
-T_upper = [[model.T_upper_bound[b, t] for t in model.t] for b in model.buildings]
 q_boiler_schedule = np.array([[pyo.value(model.q_boiler_vars[b, t]) for t in model.t] for b in model.buildings])
 q_heatpump_schedule = np.array([[pyo.value(model.q_heat_vars[b, t]) for t in model.t] for b in model.buildings])
 q_total_schedule = np.array([[pyo.value(model.q_heat[b, t]) for t in model.t] for b in model.buildings])
-occupancy_schedule = np.array([[model.occupancy_profile[t] for t in model.t] for b in model.buildings])
-T_below_schedule = np.array([[pyo.value(model.T_below_lower[b, t]) for t in model.t] for b in model.buildings])
-T_above_schedule = np.array([[pyo.value(model.T_above_upper[b, t]) for t in model.t] for b in model.buildings])
-for b in range(n_buildings):
-    fig = make_subplots(rows=1, cols=1, subplot_titles=[f"Building {b} Thermal Outputs"])
-
-    fig.add_trace(
-        go.Scatter(
-            y=q_heatpump_schedule[b],
-            mode="lines",
-            name="Heat Pump Output (kW)",
-            line=dict(color="blue", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            y=q_total_schedule[b],
-            mode="lines",
-            name="Total Heat Demand (kW)",
-            line=dict(color="black", dash="dash"),
-        )
-    )
-
-    fig.update_layout(
-        title=f"Building {b} — Heat Supply from Boiler and Heat Pump",
-        xaxis_title="Time Step",
-        yaxis_title="Thermal Power (kW)",
-        legend=dict(traceorder="normal"),
-        width=900,
-        height=400,
-    )
-    fig.add_trace(go.Scatter(y=T_in, mode="lines", name="Indoor Temperature (°C)", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="red", dash="dot")))
-
-    fig.update_layout(
-        title=f"Building {b} — Indoor Temperature vs Setpoint",
-        xaxis_title="Time Step",
-        yaxis_title="Temperature (°C)",
-        width=900,
-        height=400,
-    )
-
-    fig.show()
 
 
 # --- Calculate total costs per building ---
@@ -572,53 +449,25 @@ for b in model.buildings:
     )
 
     # Temperatures (Column 2)
-    T_in_b = [pyo.value(model.T_in[b, t]) for t in model.t]
-    T_out_b = [pyo.value(model.T_out[b, t]) for t in model.t]
-    T_set_b = [model.T_set[b, t] for t in model.t]
-    T_lower_b = [model.T_lower_bound[b, t] for t in model.t]
-    T_upper_b = [model.T_upper_bound[b, t] for t in model.t]
+    T_in = [pyo.value(model.T_in[b, t]) for t in model.t]
+    T_out = [pyo.value(model.T_out[b, t]) for t in model.t]
+    T_set = [model.T_set[b, t] for t in model.t]
 
     fig.add_trace(
-        go.Scatter(y=T_in_b, mode="lines", name="Indoor Temp (°C)", line=dict(color="firebrick"), showlegend=(b == 0)),
+        go.Scatter(y=T_in, mode="lines", name="Indoor Temp (°C)", line=dict(color="firebrick"), showlegend=(b == 0)),
         row=row,
         col=2,
     )
     fig.add_trace(
         go.Scatter(
-            y=T_out_b, mode="lines", name="Outdoor Temp (°C)", line=dict(color="deepskyblue"), showlegend=(b == 0)
+            y=T_out, mode="lines", name="Outdoor Temp (°C)", line=dict(color="deepskyblue"), showlegend=(b == 0)
         ),
         row=row,
         col=2,
     )
     fig.add_trace(
         go.Scatter(
-            y=T_set_b,
-            mode="lines",
-            name="Setpoint (°C)",
-            line=dict(color="darkgreen", dash="dash"),
-            showlegend=(b == 0),
-        ),
-        row=row,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(
-            y=T_lower_b,
-            mode="lines",
-            name="Lower Deadband (°C)",
-            line=dict(color="orange", dash="dot"),
-            showlegend=(b == 0),
-        ),
-        row=row,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(
-            y=T_upper_b,
-            mode="lines",
-            name="Upper Deadband (°C)",
-            line=dict(color="purple", dash="dot"),
-            showlegend=(b == 0),
+            y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="darkgreen", dash="dash"), showlegend=(b == 0)
         ),
         row=row,
         col=2,
@@ -704,8 +553,63 @@ for b in model.buildings:
 fig.show()
 
 # ============================================================================
-# SAVE RESULTS TO JSON FOR BUILDING 0
+# PLOT OCCUPANCY AND PENALTY TOGETHER
 # ============================================================================
+
+occupancy_values = [model.occupancy_profile[t] for t in model.t]
+
+# Recalculate T_in and T_set for building 0 (they were overwritten in the visualization loop)
+T_in_b0 = [pyo.value(model.T_in[0, t]) for t in model.t]
+T_set_b0 = [model.T_set[0, t] for t in model.t]
+
+# Calculate penalty for building 0: occupancy * alpha * (T_in - T_set)^2
+penalty_values_b0 = [model.occupancy_profile[t] * alpha * (T_in_b0[t] - T_set_b0[t]) ** 2 for t in model.t]
+
+# Create figure with secondary y-axis
+from plotly.subplots import make_subplots
+
+fig_occupancy_penalty = make_subplots(specs=[[{"secondary_y": True}]])
+
+# Add occupancy trace
+fig_occupancy_penalty.add_trace(
+    go.Scatter(
+        x=list(model.t),
+        y=occupancy_values,
+        mode="lines+markers",
+        name="Occupancy",
+        line=dict(color="darkblue", width=2),
+        marker=dict(size=6),
+        fill="tozeroy",
+        fillcolor="rgba(0, 0, 139, 0.2)",
+    ),
+    secondary_y=False,
+)
+
+# Add penalty trace
+fig_occupancy_penalty.add_trace(
+    go.Scatter(
+        x=list(model.t),
+        y=penalty_values_b0,
+        mode="lines+markers",
+        name="Temperature Penalty",
+        line=dict(color="red", width=2),
+        marker=dict(size=5),
+    ),
+    secondary_y=True,
+)
+
+# Update layout
+fig_occupancy_penalty.update_layout(
+    title="Building 0: Occupancy Profile and Temperature Penalty",
+    xaxis_title="Hours",
+    hovermode="x unified",
+    template="plotly_white",
+)
+
+fig_occupancy_penalty.update_yaxes(title_text="Occupancy (1=Occupied, 0=Unoccupied)", secondary_y=False)
+fig_occupancy_penalty.update_yaxes(title_text="Temperature Penalty (£)", secondary_y=True)
+
+fig_occupancy_penalty.show()
 
 b = 0  # Save results for building 0
 
@@ -717,12 +621,7 @@ output_data = {
     "boiler_thermal_output": q_boiler_schedule[b].tolist(),
     "indoor_temperature": T_in[b].tolist() if isinstance(T_in[b], np.ndarray) else T_in[b],
     "temperature_setpoint": T_set[b].tolist() if isinstance(T_set[b], np.ndarray) else T_set[b],
-    "temperature_lower_deadband": T_lower[b].tolist() if isinstance(T_lower[b], np.ndarray) else T_lower[b],
-    "temperature_upper_deadband": T_upper[b].tolist() if isinstance(T_upper[b], np.ndarray) else T_upper[b],
     "outdoor_temperature": T_out[b].tolist() if isinstance(T_out[b], np.ndarray) else T_out[b],
-    "occupancy_profile": occupancy_schedule[b].tolist(),
-    "temperature_below_lower_deadband": T_below_schedule[b].tolist(),
-    "temperature_above_upper_deadband": T_above_schedule[b].tolist(),
     "electricity_price": data_hr["price"].values.tolist(),
     "electricity_costs": [
         float(c)
@@ -746,53 +645,3 @@ print(f"Building 0 Summary:")
 print(f"Total Electricity Cost: £{electricity_costs[b]:.2f}")
 print(f"Total Gas Cost: £{gas_costs[b]:.2f}")
 print(f"Total Cost: £{total_costs[b]:.2f}")
-
-
-# ============================================================================
-# DEADBAND VIOLATION & OCCUPANCY ANALYSIS
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("DEADBAND THERMAL PENALTY ANALYSIS")
-print("=" * 80)
-
-for b in model.buildings:
-    print(f"\nBuilding {b}:")
-    print(f"-" * 40)
-
-    # Calculate deadband violation statistics
-    below_violations = np.sum(T_below_schedule[b])
-    above_violations = np.sum(T_above_schedule[b])
-    total_violations = below_violations + above_violations
-
-    # Count time steps with violations during occupancy
-    occupied_below_violations = sum(
-        1 for t in range(time_horizon) if T_below_schedule[b][t] > 0.01 and occupancy_schedule[b][t] > 0.1
-    )
-    occupied_above_violations = sum(
-        1 for t in range(time_horizon) if T_above_schedule[b][t] > 0.01 and occupancy_schedule[b][t] > 0.1
-    )
-
-    print(
-        f"Total Temperature Below Lower Deadband: {below_violations:.2f}°C∙h (over {np.sum(np.array(T_below_schedule[b]) > 0.01):.0f} time steps)"
-    )
-    print(
-        f"Total Temperature Above Upper Deadband: {above_violations:.2f}°C∙h (over {np.sum(np.array(T_above_schedule[b]) > 0.01):.0f} time steps)"
-    )
-    print(f"Occupied Time Steps with Lower Deadband Violation: {occupied_below_violations}")
-    print(f"Occupied Time Steps with Upper Deadband Violation: {occupied_above_violations}")
-
-    # Occupancy statistics
-    avg_occupancy = np.mean(occupancy_schedule[b])
-    max_occupancy = np.max(occupancy_schedule[b])
-    print(f"\nAverage Occupancy: {avg_occupancy:.2%}")
-    print(f"Peak Occupancy: {max_occupancy:.2%}")
-
-    # Temperature statistics
-    avg_temp = np.mean(T_in[b])
-    min_temp = np.min(T_in[b])
-    max_temp = np.max(T_in[b])
-    print(f"\nTemperature Statistics:")
-    print(f"  Average Indoor Temperature: {avg_temp:.2f}°C")
-    print(f"  Minimum Indoor Temperature: {min_temp:.2f}°C")
-    print(f"  Maximum Indoor Temperature: {max_temp:.2f}°C")
