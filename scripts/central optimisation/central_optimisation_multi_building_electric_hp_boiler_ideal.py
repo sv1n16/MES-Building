@@ -18,7 +18,7 @@ cols = data.columns[data.columns.str.contains("consumption", case=False)]
 consumption_data = data[cols]
 
 # Get top 3 column names by total consumption
-top3_consumers = consumption_data.sum().sort_values(ascending=False).head(2).index.tolist()
+top3_consumers = consumption_data.sum().sort_values(ascending=False).head(4).index.tolist()
 cols = top3_consumers  # all building consumption columns
 
 data["price"] = data["price (p/kwh)"] / 100.0
@@ -50,7 +50,7 @@ p_th_nom = 12
 T_ref = 7
 cop = np.ones(time_horizon) * 2.18
 T_init = 20.0
-max_thermal_power = 50.0  # kW
+max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
 gas_price = 5  # Gas price (p/kWh)
 hp_max_power = 10.0  # Maximum heat pump electrical power (kW)
@@ -60,7 +60,7 @@ model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
 dt = 1.0
 model.dt = pyo.Param(initialize=dt)
-alpha = 0
+alpha = 0.5
 
 # ---- Parameters ----
 
@@ -313,46 +313,6 @@ T_set = [[model.T_set[b, t] for t in model.t] for b in model.buildings]
 q_boiler_schedule = np.array([[pyo.value(model.q_boiler_vars[b, t]) for t in model.t] for b in model.buildings])
 q_heatpump_schedule = np.array([[pyo.value(model.q_heat_vars[b, t]) for t in model.t] for b in model.buildings])
 q_total_schedule = np.array([[pyo.value(model.q_heat[b, t]) for t in model.t] for b in model.buildings])
-for b in range(n_buildings):
-    fig = make_subplots(rows=1, cols=1, subplot_titles=[f"Building {b} Thermal Outputs"])
-
-    fig.add_trace(
-        go.Scatter(
-            y=q_heatpump_schedule[b],
-            mode="lines",
-            name="Heat Pump Output (kW)",
-            line=dict(color="blue", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            y=q_total_schedule[b],
-            mode="lines",
-            name="Total Heat Demand (kW)",
-            line=dict(color="black", dash="dash"),
-        )
-    )
-
-    fig.update_layout(
-        title=f"Building {b} — Heat Supply from Boiler and Heat Pump",
-        xaxis_title="Time Step",
-        yaxis_title="Thermal Power (kW)",
-        legend=dict(traceorder="normal"),
-        width=900,
-        height=400,
-    )
-    fig.add_trace(go.Scatter(y=T_in, mode="lines", name="Indoor Temperature (°C)", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="red", dash="dot")))
-
-    fig.update_layout(
-        title=f"Building {b} — Indoor Temperature vs Setpoint",
-        xaxis_title="Time Step",
-        yaxis_title="Temperature (°C)",
-        width=900,
-        height=400,
-    )
-
-    fig.show()
 
 
 # --- Calculate total costs per building ---
@@ -370,17 +330,17 @@ fig = make_subplots(
 for b in model.buildings:
     row = b + 1
 
-    # Electricity & Gas costs
+    # Electricity & Gas costs (only charge for positive imports, not exports)
     elec_cost_b_schedule = [
         data["price"].values[t]
-        * (
+        * max(
+            0,
             pyo.value(model.p_hp[b, t])
             + pyo.value(model.charge[b, t])
             - pyo.value(model.discharge[b, t])
             - pyo.value(model.pv_supply[b, t])
-            + model.electric_load[b, t]
+            + model.electric_load[b, t],
         )
-        * 1
         for t in model.t
     ]
 
@@ -538,3 +498,42 @@ for b in model.buildings:
     fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
 
 fig.show()
+
+# ============================================================================
+# SAVE RESULTS TO JSON FOR BUILDING 0
+# ============================================================================
+
+b = 0  # Save results for building 0
+
+output_data = {
+    "battery_charge_schedule": charge_schedule[b].tolist(),
+    "battery_discharge_schedule": discharge_schedule[b].tolist(),
+    "battery_soc_schedule": soc_schedule[b].tolist(),
+    "heatpump_thermal_output": q_heatpump_schedule[b].tolist(),
+    "boiler_thermal_output": q_boiler_schedule[b].tolist(),
+    "indoor_temperature": T_in[b].tolist() if isinstance(T_in[b], np.ndarray) else T_in[b],
+    "temperature_setpoint": T_set[b].tolist() if isinstance(T_set[b], np.ndarray) else T_set[b],
+    "outdoor_temperature": T_out[b].tolist() if isinstance(T_out[b], np.ndarray) else T_out[b],
+    "electricity_price": data_hr["price"].values.tolist(),
+    "electricity_costs": [
+        float(c)
+        for c in [data_hr["price"].values[t] * max(0, grid_import_schedule[b][t]) for t in range(time_horizon)]
+    ],
+    "gas_costs": [gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) for t in model.t],
+    "total_costs": [electricity_costs[b] / time_horizon, gas_costs[b] / time_horizon],  # Per time step
+    "load": load_schedule[b].tolist(),
+    "pv_supply": pv_schedule[b].tolist(),
+    "battery_net_charge": net_charge_schedule[b].tolist(),
+    "heatpump_electrical": heatpump_schedule[b].tolist(),
+    "grid_import": grid_import_schedule[b].tolist(),
+    "total_heat_demand": q_total_schedule[b].tolist(),
+}
+
+with open("Results/schedules/central_optimisation_schedules_and_costs.json", "w") as f:
+    json.dump(output_data, f, indent=2)
+
+print("\nCentral optimization results saved to: Results/schedules/central_optimisation_schedules_and_costs.json")
+print(f"Building 0 Summary:")
+print(f"Total Electricity Cost: £{electricity_costs[b]:.2f}")
+print(f"Total Gas Cost: £{gas_costs[b]:.2f}")
+print(f"Total Cost: £{total_costs[b]:.2f}")

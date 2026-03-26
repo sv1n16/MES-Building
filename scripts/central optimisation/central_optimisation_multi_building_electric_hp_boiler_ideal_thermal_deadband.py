@@ -1,4 +1,3 @@
-from gurobipy import Model, GRB
 import pyomo.environ as pyo
 import json
 import numpy as np
@@ -22,7 +21,7 @@ top3_consumers = consumption_data.sum().sort_values(ascending=False).head(4).ind
 cols = top3_consumers  # all building consumption columns
 
 data["price"] = data["price (p/kwh)"] / 100.0
-
+print(data["price"].mean())
 # --- create hour index ---
 data["hour"] = data.index // 12  # 12 rows per hour for 5-minute data
 
@@ -60,17 +59,16 @@ model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
 dt = 1.0
 model.dt = pyo.Param(initialize=dt)
-alpha = 0.5
+alpha = 0.03
 beta = 300.0  # Deadband penalty coefficient for lower bound violation (higher penalty)
 theta = 50.0  # Upper deadband penalty coefficient for upper bound violation
 
 # ---- Occupancy Model Parameters ----
-# Define binary occupancy model: 1 during peak hours and night, 0 between 9 AM and 4 PM
 occupancy_profile = {
-    0: 1,  # 00:00-01:00 (night - occupied)
-    1: 1,  # 01:00-02:00 (night - occupied)
+    0: 1,
+    1: 1,
     2: 1,  # 02:00-03:00 (night - occupied)
-    3: 1,  # 03:00-04:00 (night - occupied)
+    3: 1,  # 03:00-04:00 (night - occupied)F
     4: 1,  # 04:00-05:00 (night - occupied)
     5: 1,  # 05:00-06:00 (night - occupied)
     6: 1,  # 06:00-07:00 (morning - occupied)
@@ -93,23 +91,26 @@ occupancy_profile = {
     23: 1,  # 23:00-00:00 (night - occupied)
 }
 
-# Temperature deadbands based on occupancy
-# Lower deadband (comfort threshold when occupied)
-# Upper deadband (comfort threshold for cooling)
-T_lower_nominal = 18.0  # Minimum comfort temperature when occupied
-T_upper_nominal = 24.0  # Maximum comfort temperature when occupied
-T_lower_unoccupied = 10.0  # Minimum acceptable when unoccupied
-T_upper_unoccupied = 20.0  # Maximum acceptable when unoccupied
+
+T_lower_nominal = 18.0
+T_upper_nominal = 24.0
+T_lower_unoccupied = 10.0
+T_upper_unoccupied = 20.0
+
+# Night hours deadband (larger deadband during night: 15-20)
+night_hours = list(range(0, 6)) + list(range(22, 24))  # 0-5 and 22-23
+T_lower_night = 15.0
+T_upper_night = 20.0
 
 # ---- Randomize Initial Building Temperatures ----
-# Generate random initial temperatures for each building within comfort range
-T_init_lower = 15  # 18.0°C
-T_init_upper = T_upper_nominal  # 24.0°C
+np.random.seed(42)
+T_init_lower = 18.0  # Lower bound for random initial temperature
+T_init_upper = 22.0  # Upper bound for random initial temperature
 initial_T_frac = np.random.rand(n_buildings)
 initial_T_in = [float(T_init_lower + f * (T_init_upper - T_init_lower)) for f in initial_T_frac]
-print(f"Initial building temperatures (randomized within {T_init_lower}-{T_init_upper}°C range):")
+print(f"Initial building temperatures (randomized within {T_init_lower}-{T_init_upper}C range):")
 for b in range(n_buildings):
-    print(f"  Building {b}: {initial_T_in[b]:.2f}°C")
+    print(f"  Building {b}: {initial_T_in[b]:.2f}C")
 
 # ---- Parameters ----
 
@@ -126,7 +127,6 @@ model.charge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initiali
 model.discharge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initialize=0)
 
 ## Initial SOC: random values between 0 and 1 (fractions) for each building,
-## converted to kWh by multiplying by battery_capacity
 initial_soc_frac = np.random.rand(n_buildings)
 initial_soc = [float(f * battery_capacity) for f in initial_soc_frac]
 
@@ -196,15 +196,16 @@ model.occupancy_profile = pyo.Param(
     model.t, initialize={t: occupancy_profile.get(t % 24, 0.5) for t in range(time_horizon)}
 )
 
-# Temperature bounds based on occupancy
-# During occupied hours: T_set ± 1°C
-# During unoccupied hours: T_lower_unoccupied to T_upper_unoccupied
 model.T_lower_bound = pyo.Param(
     model.buildings,
     model.t,
     initialize={
-        (b, t): (model.T_set[b, t] - 1.0) * model.occupancy_profile[t]
-        + T_lower_unoccupied * (1 - model.occupancy_profile[t])
+        (b, t): (
+            T_lower_night
+            if (t % 24) in night_hours
+            else (model.T_set[b, t] - 1.0) * model.occupancy_profile[t]
+            + T_lower_unoccupied * (1 - model.occupancy_profile[t])
+        )
         for b in model.buildings
         for t in model.t
     },
@@ -213,8 +214,12 @@ model.T_upper_bound = pyo.Param(
     model.buildings,
     model.t,
     initialize={
-        (b, t): (model.T_set[b, t] + 1.0) * model.occupancy_profile[t]
-        + T_upper_unoccupied * (1 - model.occupancy_profile[t])
+        (b, t): (
+            T_upper_night
+            if (t % 24) in night_hours
+            else (model.T_set[b, t] + 1.0) * model.occupancy_profile[t]
+            + T_upper_unoccupied * (1 - model.occupancy_profile[t])
+        )
         for b in model.buildings
         for t in model.t
     },
@@ -223,8 +228,6 @@ model.T_upper_bound = pyo.Param(
 # ============================================================================
 # CONSTRAINT DEFINITIONS
 # ============================================================================
-
-# ---- Battery Constraints ----
 
 
 def charge_max_rule(model, b, t):
@@ -393,16 +396,7 @@ model.temperature_above_upper_2 = pyo.Constraint(model.buildings, model.t, rule=
 
 
 def objective_rule(model):
-    """Minimize total cost: electricity + gas + deadband penalty
 
-    Deadband penalty (weighted by occupancy):
-    occupancy⋅[c⋅max(0, T−Thigh)²+c⋅max(0, Tlow−T)²]
-    where:
-      Tlow = T_lower_bound (lower deadband threshold)
-      Thigh = T_upper_bound (upper deadband threshold)
-      c = beta, theta (penalty coefficients)
-      occupancy = occupancy_profile[t]
-    """
     return sum(
         # Energy costs
         data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
@@ -449,46 +443,6 @@ q_total_schedule = np.array([[pyo.value(model.q_heat[b, t]) for t in model.t] fo
 occupancy_schedule = np.array([[model.occupancy_profile[t] for t in model.t] for b in model.buildings])
 T_below_schedule = np.array([[pyo.value(model.T_below_lower[b, t]) for t in model.t] for b in model.buildings])
 T_above_schedule = np.array([[pyo.value(model.T_above_upper[b, t]) for t in model.t] for b in model.buildings])
-for b in range(n_buildings):
-    fig = make_subplots(rows=1, cols=1, subplot_titles=[f"Building {b} Thermal Outputs"])
-
-    fig.add_trace(
-        go.Scatter(
-            y=q_heatpump_schedule[b],
-            mode="lines",
-            name="Heat Pump Output (kW)",
-            line=dict(color="blue", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            y=q_total_schedule[b],
-            mode="lines",
-            name="Total Heat Demand (kW)",
-            line=dict(color="black", dash="dash"),
-        )
-    )
-
-    fig.update_layout(
-        title=f"Building {b} — Heat Supply from Boiler and Heat Pump",
-        xaxis_title="Time Step",
-        yaxis_title="Thermal Power (kW)",
-        legend=dict(traceorder="normal"),
-        width=900,
-        height=400,
-    )
-    fig.add_trace(go.Scatter(y=T_in, mode="lines", name="Indoor Temperature (°C)", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(y=T_set, mode="lines", name="Setpoint (°C)", line=dict(color="red", dash="dot")))
-
-    fig.update_layout(
-        title=f"Building {b} — Indoor Temperature vs Setpoint",
-        xaxis_title="Time Step",
-        yaxis_title="Temperature (°C)",
-        width=900,
-        height=400,
-    )
-
-    fig.show()
 
 
 # --- Calculate total costs per building ---
@@ -519,6 +473,11 @@ for b in model.buildings:
         )
         for t in model.t
     ]
+
+    # Individual cost breakdowns
+    load_cost_schedule = [data["price"].values[t] * max(0, model.electric_load[b, t]) for t in model.t]
+    charge_cost_schedule = [data["price"].values[t] * max(0, pyo.value(model.charge[b, t])) for t in model.t]
+    hp_cost_schedule = [data["price"].values[t] * max(0, pyo.value(model.p_hp[b, t])) for t in model.t]
 
     elec_cost_b = sum(elec_cost_b_schedule)
     # gas_price is in p/kWh so convert to £/kWh by dividing by 100
@@ -671,10 +630,43 @@ for b in model.buildings:
     )
     fig.add_trace(
         go.Scatter(
+            y=load_cost_schedule,
+            mode="lines",
+            name="Load Cost",
+            line=dict(color="black"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=3,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=charge_cost_schedule,
+            mode="lines",
+            name="Battery Charge Cost",
+            line=dict(color="blue"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=3,
+    )
+    fig.add_trace(
+        go.Scatter(
+            y=hp_cost_schedule,
+            mode="lines",
+            name="Heat Pump Cost",
+            line=dict(color="green"),
+            showlegend=(b == 0),
+        ),
+        row=row,
+        col=3,
+    )
+    fig.add_trace(
+        go.Scatter(
             y=elec_cost_b_schedule,
             mode="lines",
-            name="Electricity Consumption Cost",
-            line=dict(color="gold"),
+            name="Total Electricity Cost",
+            line=dict(color="gold", width=2),
             showlegend=(b == 0),
         ),
         row=row,
@@ -702,6 +694,60 @@ for b in model.buildings:
     fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
 
 fig.show()
+
+# ============================================================================
+# PLOT PENALTY VALUES AND OCCUPANCY (Building 0)
+# ============================================================================
+
+b = 0  # Building 0
+
+# Calculate occupancy and penalty values
+occupancy_values = [model.occupancy_profile[t] for t in model.t]
+penalty_values = [
+    model.occupancy_profile[t]
+    * (beta * pyo.value(model.T_below_lower[b, t]) ** 2 + theta * pyo.value(model.T_above_upper[b, t]) ** 2)
+    for t in model.t
+]
+
+# Create figure with secondary y-axis
+fig_penalty = go.Figure()
+
+# Add occupancy trace (left y-axis)
+fig_penalty.add_trace(
+    go.Scatter(
+        x=list(range(time_horizon)),
+        y=occupancy_values,
+        mode="lines+markers",
+        name="Occupancy",
+        line=dict(color="blue", width=2),
+        yaxis="y1",
+    )
+)
+
+# Add penalty trace (right y-axis)
+fig_penalty.add_trace(
+    go.Scatter(
+        x=list(range(time_horizon)),
+        y=penalty_values,
+        mode="lines",
+        name="Thermal Comfort Penalty",
+        line=dict(color="red", width=3),
+        yaxis="y2",
+    )
+)
+
+fig_penalty.update_layout(
+    title="Building 0: Occupancy Profile and Thermal Comfort Penalty",
+    xaxis=dict(title="Time (hours)"),
+    yaxis=dict(title="Occupancy", side="left", tickfont=dict(color="blue"), range=[0, 1.1]),
+    yaxis2=dict(title="Penalty Value", side="right", overlaying="y", tickfont=dict(color="red")),
+    hovermode="x unified",
+    width=1000,
+    height=600,
+    legend=dict(x=0.02, y=0.98),
+)
+
+fig_penalty.show()
 
 # ============================================================================
 # SAVE RESULTS TO JSON FOR BUILDING 0
@@ -746,53 +792,3 @@ print(f"Building 0 Summary:")
 print(f"Total Electricity Cost: £{electricity_costs[b]:.2f}")
 print(f"Total Gas Cost: £{gas_costs[b]:.2f}")
 print(f"Total Cost: £{total_costs[b]:.2f}")
-
-
-# ============================================================================
-# DEADBAND VIOLATION & OCCUPANCY ANALYSIS
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("DEADBAND THERMAL PENALTY ANALYSIS")
-print("=" * 80)
-
-for b in model.buildings:
-    print(f"\nBuilding {b}:")
-    print(f"-" * 40)
-
-    # Calculate deadband violation statistics
-    below_violations = np.sum(T_below_schedule[b])
-    above_violations = np.sum(T_above_schedule[b])
-    total_violations = below_violations + above_violations
-
-    # Count time steps with violations during occupancy
-    occupied_below_violations = sum(
-        1 for t in range(time_horizon) if T_below_schedule[b][t] > 0.01 and occupancy_schedule[b][t] > 0.1
-    )
-    occupied_above_violations = sum(
-        1 for t in range(time_horizon) if T_above_schedule[b][t] > 0.01 and occupancy_schedule[b][t] > 0.1
-    )
-
-    print(
-        f"Total Temperature Below Lower Deadband: {below_violations:.2f}°C∙h (over {np.sum(np.array(T_below_schedule[b]) > 0.01):.0f} time steps)"
-    )
-    print(
-        f"Total Temperature Above Upper Deadband: {above_violations:.2f}°C∙h (over {np.sum(np.array(T_above_schedule[b]) > 0.01):.0f} time steps)"
-    )
-    print(f"Occupied Time Steps with Lower Deadband Violation: {occupied_below_violations}")
-    print(f"Occupied Time Steps with Upper Deadband Violation: {occupied_above_violations}")
-
-    # Occupancy statistics
-    avg_occupancy = np.mean(occupancy_schedule[b])
-    max_occupancy = np.max(occupancy_schedule[b])
-    print(f"\nAverage Occupancy: {avg_occupancy:.2%}")
-    print(f"Peak Occupancy: {max_occupancy:.2%}")
-
-    # Temperature statistics
-    avg_temp = np.mean(T_in[b])
-    min_temp = np.min(T_in[b])
-    max_temp = np.max(T_in[b])
-    print(f"\nTemperature Statistics:")
-    print(f"  Average Indoor Temperature: {avg_temp:.2f}°C")
-    print(f"  Minimum Indoor Temperature: {min_temp:.2f}°C")
-    print(f"  Maximum Indoor Temperature: {max_temp:.2f}°C")

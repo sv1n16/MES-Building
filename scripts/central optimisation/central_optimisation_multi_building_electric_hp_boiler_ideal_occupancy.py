@@ -60,9 +60,52 @@ model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
 dt = 1.0
 model.dt = pyo.Param(initialize=dt)
-alpha = 0.5
+alpha = 0.03
 
-# ---- Parameters ----
+# ---- Binary Occupancy Model ----
+# 1 during peak hours (night to 9 AM, 4 PM to midnight)
+# 0 during daytime (9 AM to 4 PM)
+occupancy_profile = {
+    0: 1,  # 00:00-01:00 (night - occupied)
+    1: 1,  # 01:00-02:00 (night - occupied)
+    2: 1,  # 02:00-03:00 (night - occupied)
+    3: 1,  # 03:00-04:00 (night - occupied)
+    4: 1,  # 04:00-05:00 (night - occupied)
+    5: 1,  # 05:00-06:00 (night - occupied)
+    6: 1,  # 06:00-07:00 (morning - occupied)
+    7: 1,  # 07:00-08:00 (morning - occupied)
+    8: 1,  # 08:00-09:00 (morning - occupied)
+    9: 0,  # 09:00-10:00 (unoccupied)
+    10: 0,  # 10:00-11:00 (unoccupied)
+    11: 0,  # 11:00-12:00 (unoccupied)
+    12: 0,  # 12:00-13:00 (unoccupied)
+    13: 0,  # 13:00-14:00 (unoccupied)
+    14: 0,  # 14:00-15:00 (unoccupied)
+    15: 0,  # 15:00-16:00 (unoccupied)
+    16: 1,  # 16:00-17:00 (evening - occupied)
+    17: 1,  # 17:00-18:00 (evening - occupied)
+    18: 1,  # 18:00-19:00 (evening - occupied)
+    19: 1,  # 19:00-20:00 (evening - occupied)
+    20: 1,  # 20:00-21:00 (evening - occupied)
+    21: 1,  # 21:00-22:00 (evening - occupied)
+    22: 1,  # 22:00-23:00 (night - occupied)
+    23: 1,  # 23:00-00:00 (night - occupied)
+}
+
+# Temperature deadbands based on occupancy
+T_lower_unoccupied = 10.0  # Minimum acceptable when unoccupied
+T_upper_unoccupied = 28.0  # Maximum acceptable when unoccupied
+
+# ---- Randomize Initial Building Temperatures ----
+# Set fixed random seed for reproducibility in comparisons
+np.random.seed(42)
+T_init_lower = 18.0  # Lower bound for random initial temperature
+T_init_upper = 24.0  # Upper bound for random initial temperature
+initial_T_frac = np.random.rand(n_buildings)
+initial_T_in = [float(T_init_lower + f * (T_init_upper - T_init_lower)) for f in initial_T_frac]
+print(f"Initial building temperatures (randomized within {T_init_lower}-{T_init_upper}C range):")
+for b in range(n_buildings):
+    print(f"  Building {b}: {initial_T_in[b]:.2f}C")
 
 irradiance = data_hr["pv"].values.flatten() / 1000
 pv_data = irradiance
@@ -104,7 +147,12 @@ model.gas_consumption = pyo.Var(model.buildings, model.t, domain=pyo.Reals, boun
 model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_power), initialize=0)
 
 # Thermal variables
-model.T_in = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=T_init)
+model.T_in = pyo.Var(
+    model.buildings,
+    model.t,
+    bounds=(0, None),
+    initialize=lambda m, b, t: initial_T_in[b] if t == 0 else T_init,
+)
 
 # ---- Parameters (Data) ----
 
@@ -128,6 +176,11 @@ model.T_set = pyo.Param(
 
 model.C = pyo.Param(model.buildings, initialize={b: 10 for b in model.buildings})
 model.U = pyo.Param(model.buildings, initialize={b: 0.5 for b in model.buildings})
+
+# Occupancy parameter (binary: 1=occupied, 0=unoccupied)
+model.occupancy_profile = pyo.Param(
+    model.t, initialize={t: occupancy_profile.get(t % 24, 0) for t in range(time_horizon)}
+)
 
 # ============================================================================
 # CONSTRAINT DEFINITIONS
@@ -257,7 +310,7 @@ model.heat_balance = pyo.Constraint(model.buildings, model.t, rule=heat_balance_
 def thermal_dynamics_rule(model, b, t):
     """Building thermal dynamics with heat loss"""
     if t == 0:
-        return model.T_in[b, t] == T_init
+        return model.T_in[b, t] == initial_T_in[b]
     else:
         return model.T_in[b, t] == model.T_in[b, t - 1] + model.dt / 10 * (
             model.q_heat[b, t] - 0.5 * (model.T_in[b, t - 1] - model.T_out[b, t])
@@ -273,11 +326,11 @@ model.thermal_dynamics = pyo.Constraint(model.buildings, model.t, rule=thermal_d
 
 
 def objective_rule(model):
-    """Minimize total cost: electricity + gas + temperature deviation penalty"""
+    """Minimize total cost: electricity + gas + occupancy-weighted temperature deviation penalty"""
     return sum(
         data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
         + gas_price / 100 * model.gas_consumption[b, t] * model.dt
-        + alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
+        + model.occupancy_profile[t] * alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
         for b in model.buildings
         for t in model.t
     )
@@ -500,8 +553,63 @@ for b in model.buildings:
 fig.show()
 
 # ============================================================================
-# SAVE RESULTS TO JSON FOR BUILDING 0
+# PLOT OCCUPANCY AND PENALTY TOGETHER
 # ============================================================================
+
+occupancy_values = [model.occupancy_profile[t] for t in model.t]
+
+# Recalculate T_in and T_set for building 0 (they were overwritten in the visualization loop)
+T_in_b0 = [pyo.value(model.T_in[0, t]) for t in model.t]
+T_set_b0 = [model.T_set[0, t] for t in model.t]
+
+# Calculate penalty for building 0: occupancy * alpha * (T_in - T_set)^2
+penalty_values_b0 = [model.occupancy_profile[t] * alpha * (T_in_b0[t] - T_set_b0[t]) ** 2 for t in model.t]
+
+# Create figure with secondary y-axis
+from plotly.subplots import make_subplots
+
+fig_occupancy_penalty = make_subplots(specs=[[{"secondary_y": True}]])
+
+# Add occupancy trace
+fig_occupancy_penalty.add_trace(
+    go.Scatter(
+        x=list(model.t),
+        y=occupancy_values,
+        mode="lines+markers",
+        name="Occupancy",
+        line=dict(color="darkblue", width=2),
+        marker=dict(size=6),
+        fill="tozeroy",
+        fillcolor="rgba(0, 0, 139, 0.2)",
+    ),
+    secondary_y=False,
+)
+
+# Add penalty trace
+fig_occupancy_penalty.add_trace(
+    go.Scatter(
+        x=list(model.t),
+        y=penalty_values_b0,
+        mode="lines+markers",
+        name="Temperature Penalty",
+        line=dict(color="red", width=2),
+        marker=dict(size=5),
+    ),
+    secondary_y=True,
+)
+
+# Update layout
+fig_occupancy_penalty.update_layout(
+    title="Building 0: Occupancy Profile and Temperature Penalty",
+    xaxis_title="Hours",
+    hovermode="x unified",
+    template="plotly_white",
+)
+
+fig_occupancy_penalty.update_yaxes(title_text="Occupancy (1=Occupied, 0=Unoccupied)", secondary_y=False)
+fig_occupancy_penalty.update_yaxes(title_text="Temperature Penalty (£)", secondary_y=True)
+
+fig_occupancy_penalty.show()
 
 b = 0  # Save results for building 0
 
