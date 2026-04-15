@@ -2,7 +2,7 @@ import pyomo.environ as pyo
 
 
 class Building:
-    def __init__(self, building_components=[], heatload=None, time_horizon=12, **kwargs):
+    def __init__(self, building_components=[], heatload=None, time_horizon=12, optimise=False, **kwargs):
 
         building_parameters = kwargs.get("thermal", {})
         self.building_components = building_components
@@ -16,9 +16,12 @@ class Building:
         self.T_out = kwargs.get("T_out")  # Default outdoor temperature if not provided
         self.T_init = kwargs.get("T_init", 20)  # Default initial indoor temperature if not provided
         self.T_set = kwargs.get("T_set", [21] * time_horizon)  # Default setpoint if not provided
-        self.update_model_parameters()
-        self.update_model_constraints()
-        print(building_components)
+
+        if optimise:
+
+            self.update_model_parameters()
+            self.update_model_constraints()
+        # print(building_components)
         self.heatload = heatload
 
         if self.heatload is None:

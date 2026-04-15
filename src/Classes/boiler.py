@@ -12,7 +12,7 @@ class GasBoiler:
         max_thermal_power=20.0,  # kW, maximum thermal output
         min_thermal_power=0.0,  # kW, minimum thermal output
         efficiency=0.9,  # Boiler efficiency (fraction)
-        gas_price=0.5,  # Gas price (£/kWh or €/kWh)
+        gas_price=0.05,  # Gas price (£/kWh or €/kWh)
         p_th_heat=None,  # Thermal output schedule (kW)
     ):
         self.time_horizon = time_horizon
