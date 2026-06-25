@@ -9,7 +9,7 @@ class Battery:
         self.max_charge_power = kwargs.get("max_charge_power", 4.6)
         self.max_discharge_power = kwargs.get("max_discharge_power", 4.6)
         self.max_capacity = kwargs.get("capacity", 12.0)
-        self.initial_soc = kwargs.get("initial_soc", 0.8) * self.max_capacity
+        self.initial_soc = kwargs.get("initial_soc", 0.5) * self.max_capacity
         self.eta = kwargs.get("eta_charge", 0.9)  # Charging efficiency
 
         self.p_el_charge_schedule = p_el_demand

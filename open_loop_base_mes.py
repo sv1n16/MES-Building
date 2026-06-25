@@ -20,14 +20,19 @@ from src.Classes.heatpump import HeatPump
 p_el_charge = np.array([4.6, 3.2, 0.0, 4.6, 4.6, 4.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # charging schedule
 p_el_discharge = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.6, 4.6, 4.6, 4.6, 4.6, 4.6])  # discharge schedule
 
+# Limit discharge to maximum power allowed
+max_discharge_power = 4.6  # kW - adjust this to limit discharge
+p_el_discharge = np.minimum(p_el_discharge, max_discharge_power)
+p_el_charge = np.minimum(p_el_charge, max_discharge_power)
 
-time_horizon = 12  # 24 hours
+time_horizon = 12  # 12 hours
 delta_t = 1  # 1 hour time step
 radiation = pd.read_csv("data\\radiation.csv").values.flatten()
 load = pd.read_csv("data\\load.csv").values.flatten()
 price = pd.read_csv("data\\price.csv").values.flatten() / 100.0  # convert p/kWh -> £/kWh
 heat_load = pd.read_csv("data\\heat_load.csv").values.flatten()
 
+# Initialize battery, PV, heat pump, and boiler components
 bat = Battery(p_el_demand=p_el_charge, p_el_supply=p_el_discharge)
 pv = PVModule(
     time_horizon=time_horizon,
@@ -42,7 +47,6 @@ boiler = GasBoiler(time_horizon=time_horizon)
 bd = Building(building_components=[bat, pv, eh, boiler])
 
 # Update the battery schedule
-# bp_el_schedule = bat.p_el_demand - bat.p_el_supply
 bat.energy_el_schedule = bat.battery_energy_schedule(time_horizon, delta_t)
 bat.power_el_schedule = p_el_charge - p_el_discharge
 pv.p_el_schedule = -1 * pv.p_el_supply
@@ -112,8 +116,9 @@ boiler.set_thermal_output(p_th_heat_boiler)
 
 
 # Calculate the cost at each time step (match central optimisation)
+# Only charge for positive grid imports, not exports
 total_electricity = load + bat.power_el_schedule - pv.p_el_supply + eh.p_el_schedule
-costs = np.array([price[t] * total_electricity[t] for t in range(time_horizon)])
+costs = np.array([price[t] * max(0, total_electricity[t]) for t in range(time_horizon)])
 gas_costs = np.array(boiler.gas_consumption_schedule) * boiler.gas_price
 total_costs = costs + gas_costs
 print("Electricity Costs:", sum(costs))
@@ -125,10 +130,8 @@ print("Total costs (electricity + gas):", sum(total_costs))
 import json
 
 output_data = {
-    "battery_charge_schedule": bat.p_el_charge.tolist() if hasattr(bat, "p_el_charge") else p_el_charge.tolist(),
-    "battery_discharge_schedule": (
-        bat.p_el_discharge.tolist() if hasattr(bat, "p_el_discharge") else p_el_discharge.tolist()
-    ),
+    "battery_charge_schedule": p_el_charge.tolist(),
+    "battery_discharge_schedule": p_el_discharge.tolist(),
     "battery_soc_schedule": bat.energy_el_schedule.tolist(),
     "heatpump_thermal_output": p_th_heat_hp.tolist(),
     "boiler_thermal_output": p_th_heat_boiler.tolist(),
@@ -139,6 +142,12 @@ output_data = {
     "electricity_costs": costs.tolist(),
     "gas_costs": gas_costs.tolist(),
     "total_costs": total_costs.tolist(),
+    "load": load.tolist(),
+    "pv_supply": pv.p_el_supply.tolist(),
+    "battery_net_charge": bat.power_el_schedule.tolist(),
+    "heatpump_electrical": eh.p_el_schedule,
+    "required_heat": required_heat.tolist(),
+    "grid_import": bd.p_el_schedule.tolist(),
 }
 
 with open("Results/schedules/open_loop_schedules_and_costs.json", "w") as f:
@@ -228,3 +237,171 @@ fig.update_layout(
 for annotation in fig["layout"]["annotations"]:
     annotation["font"] = dict(size=8)
 fig.show()
+# ============================================================================
+# PLOT IN CENTRAL OPTIMIZATION FORMAT (3 COLUMNS)
+# ============================================================================
+
+# Prepare electricity consumption cost schedule (matching central optimization calculation)
+grid_import = bd.p_el_schedule
+elec_cost_schedule = [price[t] * grid_import[t] * delta_t for t in range(time_horizon)]
+total_cost_schedule = [elec_cost_schedule[t] + gas_costs[t] for t in range(time_horizon)]
+
+# Create figure with 3 columns format (matching central_optimisation_multi_building_electric_hp_boiler_ideal.py)
+fig_central_format = make_subplots(
+    rows=1,
+    cols=3,
+    subplot_titles=("Battery and Heat Pump Operation", "Building Temperatures", "Costs"),
+    shared_xaxes=True,
+    shared_yaxes=False,
+)
+
+plot_time_list = list(range(time_horizon))
+
+# Column 1: Battery and Heat Pump Operation
+fig_central_format.add_trace(
+    go.Scatter(
+        y=load, mode="lines", name="Load (kW)", line=dict(color="black"), showlegend=True
+    ),
+    row=1,
+    col=1,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=pv.p_el_supply, mode="lines", name="PV Supply (kW)", line=dict(color="orange"), showlegend=True
+    ),
+    row=1,
+    col=1,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=bat.power_el_schedule,
+        mode="lines",
+        name="Battery Net Charge (kW)",
+        line=dict(color="blue"),
+        showlegend=True,
+    ),
+    row=1,
+    col=1,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=bat.energy_el_schedule, mode="lines", name="Battery SOC (kWh)", line=dict(color="purple"), showlegend=True
+    ),
+    row=1,
+    col=1,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=eh.p_el_schedule, mode="lines", name="Heat Pump (kW)", line=dict(color="green"), showlegend=True
+    ),
+    row=1,
+    col=1,
+)
+
+# Column 2: Building Temperatures and Thermal Outputs
+fig_central_format.add_trace(
+    go.Scatter(y=indoor_temperature, mode="lines", name="Indoor Temp (°C)", line=dict(color="firebrick"), showlegend=True),
+    row=1,
+    col=2,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=outdoor_temperature, mode="lines", name="Outdoor Temp (°C)", line=dict(color="deepskyblue"), showlegend=True
+    ),
+    row=1,
+    col=2,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=temperature_setpoint, mode="lines", name="Setpoint (°C)", line=dict(color="darkgreen", dash="dash"), showlegend=True
+    ),
+    row=1,
+    col=2,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=p_th_heat_boiler,
+        mode="lines",
+        name="Boiler Output (kW)",
+        line=dict(color="red", width=2),
+        showlegend=True,
+    ),
+    row=1,
+    col=2,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=p_th_heat_hp,
+        mode="lines",
+        name="Heat Pump Output (kW)",
+        line=dict(color="cyan", width=2),
+        showlegend=True,
+    ),
+    row=1,
+    col=2,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=p_th_heat_hp + p_th_heat_boiler,
+        mode="lines",
+        name="Total Heat Demand (kW)",
+        line=dict(color="black", dash="dash"),
+        showlegend=True,
+    ),
+    row=1,
+    col=2,
+)
+
+# Column 3: Costs and Electricity Price
+fig_central_format.add_trace(
+    go.Scatter(
+        y=price,
+        mode="lines",
+        name="Electricity Price (£/kWh)",
+        line=dict(color="pink"),
+        showlegend=True,
+    ),
+    row=1,
+    col=3,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=elec_cost_schedule,
+        mode="lines",
+        name="Electricity Consumption Cost",
+        line=dict(color="gold"),
+        showlegend=True,
+    ),
+    row=1,
+    col=3,
+)
+fig_central_format.add_trace(
+    go.Scatter(
+        y=gas_costs,
+        mode="lines",
+        name="Gas Consumption Cost",
+        line=dict(color="brown"),
+        showlegend=True,
+    ),
+    row=1,
+    col=3,
+)
+
+# Axis labels
+fig_central_format.update_xaxes(title_text="Time", row=1, col=1)
+fig_central_format.update_yaxes(title_text="Power/Energy (kW/kWh)", title_font=dict(size=10), row=1, col=1)
+
+fig_central_format.update_xaxes(title_text="Time", row=1, col=2)
+fig_central_format.update_yaxes(title_text="Temperature (°C)", title_font=dict(size=10), row=1, col=2)
+
+fig_central_format.update_xaxes(title_text="Time", row=1, col=3)
+fig_central_format.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=1, col=3)
+
+fig_central_format.update_layout(
+    title_text="Open Loop Optimization Results - Central Format",
+    width=1400,
+    height=500,
+    hovermode="x unified",
+)
+
+fig_central_format.show()

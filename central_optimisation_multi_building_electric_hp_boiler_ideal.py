@@ -53,7 +53,7 @@ T_init = 20.0
 max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
 gas_price = 5  # Gas price (p/kWh)
-hp_max_power = 10.0  # Maximum heat pump electrical power (kW)
+hp_max_power = 12.0  # Maximum heat pump electrical power (kW)
 
 # ---- Sets ----
 model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
@@ -79,7 +79,7 @@ model.discharge = pyo.Var(model.buildings, model.t, bounds=(0, max_power), initi
 ## Initial SOC: random values between 0 and 1 (fractions) for each building,
 ## converted to kWh by multiplying by battery_capacity
 initial_soc_frac = np.random.rand(n_buildings)
-initial_soc = [float(f * battery_capacity) for f in initial_soc_frac]
+initial_soc = [float(0.5 * battery_capacity) for f in initial_soc_frac]
 
 model.soc = pyo.Var(
     model.buildings, model.t, bounds=(0, battery_capacity), initialize={(b): initial_soc[b] for b in model.buildings}
@@ -345,7 +345,6 @@ for b in model.buildings:
     ]
 
     elec_cost_b = sum(elec_cost_b_schedule)
-    # gas_price is in p/kWh so convert to £/kWh by dividing by 100
     gas_cost_b_schedule = [gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) * model.dt for t in model.t]
     gas_cost_b = sum(gas_cost_b_schedule)
 
@@ -500,26 +499,80 @@ for b in model.buildings:
 fig.show()
 
 # ============================================================================
-# SAVE RESULTS TO JSON FOR BUILDING 0
+# SAVE TOTAL DEMAND VS TIME DATA
 # ============================================================================
-
-b = 0  # Save results for building 0
-
-# Calculate peak demand metrics for building 0
-grid_import_b = grid_import_schedule[b]
-total_heat_demand_b = q_total_schedule[b]
-charge_b = charge_schedule[b]
-discharge_b = discharge_schedule[b]
-heatpump_output_b = q_heatpump_schedule[b]
-boiler_output_b = q_boiler_schedule[b]
-
-peak_electricity_demand = np.max(grid_import_b)
-time_of_peak_electricity_demand = int(np.argmax(grid_import_b))
-average_electricity_demand = np.mean(grid_import_b)
-peak_heat_pump_output = np.max(heatpump_output_b)
+# ===================================================================
+# MULTI-BUILDING ANALYSIS
+# ============================================================================
+# Process all buildings from optimization results and save their peak demand information
 
 
-output_data = {
+print("\n" + "=" * 70)
+print("MULTI-BUILDING ANALYSIS (OPTIMIZED)")
+print("=" * 70)
+
+all_buildings_peak_demand_opt = {}
+
+for b in model.buildings:
+    T_in = [pyo.value(model.T_in[b, t]) for t in model.t]
+    T_out = [pyo.value(model.T_out[b, t]) for t in model.t]
+    T_set = [model.T_set[b, t] for t in model.t]
+    grid_import_b = grid_import_schedule[b]
+    charge_b = charge_schedule[b]
+    discharge_b = discharge_schedule[b]
+    heatpump_output_b = q_heatpump_schedule[b]
+    boiler_output_b = q_boiler_schedule[b]
+
+    # Calculate peak metrics
+    peak_electricity_demand = np.max(grid_import_b)
+    time_of_peak_electricity = int(np.argmax(grid_import_b))
+    average_electricity_demand_b = np.mean(grid_import_b)
+
+    # Extract temperature data for this building
+
+    # Calculate thermal setpoint deviation
+    temp_deviation = np.abs(np.array(T_in) - np.array(T_set))
+    avg_temp_deviation = np.mean(temp_deviation)
+
+    # Calculate total cost for this building
+    electricity_cost_b = float(
+        np.sum([data_hr["price"].values[t] * max(0, grid_import_b[t]) for t in range(time_horizon)])
+    )
+    gas_cost_b = float(gas_price / 100.0 * np.sum([pyo.value(model.gas_consumption[b, t]) for t in model.t]))
+    total_cost_b = electricity_cost_b + gas_cost_b
+
+    # Store building data
+    all_buildings_peak_demand_opt[cols[b]] = {
+        "peak_loads": {
+            "peak_electricity_demand_kw": float(peak_electricity_demand),
+            "time_of_peak_electricity_demand_hour": time_of_peak_electricity,
+            "average_electricity_demand_kw": float(average_electricity_demand_b),
+            "total_cost_gbp": float(total_cost_b),
+            "average_thermal_setpoint_deviation_celsius": float(avg_temp_deviation),
+        },
+        "schedules": {
+            "grid_import_schedule": grid_import_schedule[b].tolist(),
+            "load_schedule": load_schedule[b].tolist(),
+            "pv_schedule": pv_schedule[b].tolist(),
+            "battery_charge_schedule": charge_schedule[b].tolist(),
+            "battery_discharge_schedule": discharge_schedule[b].tolist(),
+            "battery_soc_schedule": soc_schedule[b].tolist(),
+            "heatpump_thermal_output": q_heatpump_schedule[b].tolist(),
+            "boiler_thermal_output": q_boiler_schedule[b].tolist(),
+            "indoor_temperature": T_in,
+            "temperature_setpoint": T_set,
+            "outdoor_temperature": T_out,
+            "electricity_price": data_hr["price"].values.tolist(),
+            "electricity_costs": [
+                float(c)
+                for c in [data_hr["price"].values[t] * max(0, grid_import_schedule[b][t]) for t in range(time_horizon)]
+            ],
+        },
+    }
+
+print(all_buildings_peak_demand_opt[cols[b]]["schedules"])
+# Create consolidated JSON with single building info on top and all buildings peak demand
+consolidated_data_opt = {
     "parameters": {
         "time_horizon_hours": int(time_horizon),
         "delta_t_hours": float(delta_t),
@@ -539,114 +592,15 @@ output_data = {
         "thermal_conductance_kw_per_celsius": 0.5,
         "temperature_deviation_penalty_alpha": 0.5,
     },
-    "battery_charge_schedule": charge_schedule[b].tolist(),
-    "battery_discharge_schedule": discharge_schedule[b].tolist(),
-    "battery_soc_schedule": soc_schedule[b].tolist(),
-    "heatpump_thermal_output": q_heatpump_schedule[b].tolist(),
-    "boiler_thermal_output": q_boiler_schedule[b].tolist(),
-    "indoor_temperature": T_in.tolist(),
-    "temperature_setpoint": T_set[b].tolist() if isinstance(T_set[b], np.ndarray) else T_set[b],
-    "outdoor_temperature": T_out[b].tolist() if isinstance(T_out[b], np.ndarray) else T_out[b],
-    "electricity_price": data_hr["price"].values.tolist(),
-    "electricity_costs": [
-        float(c)
-        for c in [data_hr["price"].values[t] * max(0, grid_import_schedule[b][t]) for t in range(time_horizon)]
-    ],
-    "gas_costs": [gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) for t in model.t],
-    "total_costs": [electricity_costs[b] / time_horizon, gas_costs[b] / time_horizon],  # Per time step
-    "load": load_schedule[b].tolist(),
-    "pv_supply": pv_schedule[b].tolist(),
-    "battery_net_charge": net_charge_schedule[b].tolist(),
-    "heatpump_electrical": heatpump_schedule[b].tolist(),
-    "grid_import": grid_import_schedule[b].tolist(),
-    "total_heat_demand": q_total_schedule[b].tolist(),
-    "peak_demand": {
-        "peak_electricity_demand_kw": float(peak_electricity_demand),
-        "time_of_peak_electricity_demand_hour": time_of_peak_electricity_demand,
-        "average_electricity_demand_kw": float(average_electricity_demand),
-        "peak_heat_pump_output_kw": float(peak_heat_pump_output),
-    },
-    "costs": {
-        "total_electricity_cost_gbp": float(electricity_costs[b]),
-        "total_gas_cost_gbp": float(gas_costs[b]),
-        "total_cost_gbp": float(total_costs[b]),
-    },
+    "all_buildings_peak_demand": all_buildings_peak_demand_opt,
 }
 
-with open("Results/schedules/central_optimisation_schedules_and_costs.json", "w") as f:
-    json.dump(output_data, f, indent=2)
-
-print("\nCentral optimization results saved to: Results/schedules/central_optimisation_schedules_and_costs.json")
-print(f"Building 0 Summary:")
-print(f"Total Electricity Cost: £{electricity_costs[b]:.2f}")
-print(f"Total Gas Cost: £{gas_costs[b]:.2f}")
-print(f"Total Cost: £{total_costs[b]:.2f}")
-
-# ============================================================================
-# SAVE TOTAL DEMAND VS TIME DATA
-# ============================================================================
-
-demand_vs_time = {
-    "time_hours": list(range(time_horizon)),
-    "building": cols[0],
-    "total_electricity_demand_kw": grid_import_schedule[0].tolist(),
-    "total_thermal_demand_kw": q_total_schedule[0].tolist(),
-    "load_kw": load_schedule[0].tolist(),
-    "pv_supply_kw": pv_schedule[0].tolist(),
-    "battery_net_charge_kw": net_charge_schedule[0].tolist(),
-    "heatpump_electrical_kw": heatpump_schedule[0].tolist(),
-    "boiler_thermal_kw": q_boiler_schedule[0].tolist(),
-    "heatpump_thermal_kw": q_heatpump_schedule[0].tolist(),
-}
-
-with open("Results/schedules/central_optimisation_demand_vs_time.json", "w") as f:
-    json.dump(demand_vs_time, f, indent=2)
-
-print("Demand vs time data saved to: Results/schedules/central_optimisation_demand_vs_time.json")
-
-# ============================================================================
-# MULTI-BUILDING PEAK DEMAND ANALYSIS
-# ============================================================================
-# Process all buildings from optimization results and save their peak demand information
-
-print("\n" + "=" * 70)
-print("MULTI-BUILDING PEAK DEMAND ANALYSIS (OPTIMIZED)")
-print("=" * 70)
-
-all_buildings_peak_demand_opt = {}
-
-for b in model.buildings:
-    grid_import_b = grid_import_schedule[b]
-    total_heat_demand_b = q_total_schedule[b]
-    charge_b = charge_schedule[b]
-    discharge_b = discharge_schedule[b]
-    heatpump_output_b = q_heatpump_schedule[b]
-    boiler_output_b = q_boiler_schedule[b]
-
-    # Calculate peak metrics
-    peak_electricity_demand = np.max(grid_import_b)
-    time_of_peak_electricity = int(np.argmax(grid_import_b))
-    peak_heat_pump_output = np.max(heatpump_output_b)
-
-    # Store building data
-    all_buildings_peak_demand_opt[cols[b]] = {
-        "peak_electricity_demand_kw": float(peak_electricity_demand),
-        "time_of_peak_electricity_demand_hour": time_of_peak_electricity,
-        "average_electricity_demand_kw": float(average_electricity_demand),
-        "peak_heat_pump_output_kw": float(peak_heat_pump_output),
-    }
-
-    print(f"\nBuilding {b}: {cols[b]}")
-    print(f"  Peak Electricity: {peak_electricity_demand:.2f} kW (hour {time_of_peak_electricity})")
-    print(f"  Avg Electricity: {average_electricity_demand:.2f} kW")
-
-print(all_buildings_peak_demand_opt)
-# Save all buildings peak demand data to JSON
+# Save consolidated data to JSON
 with open("Results/schedules/central_optimisation_all_buildings_peak_demand.json", "w") as f:
-    json.dump(all_buildings_peak_demand_opt, f, indent=2)
+    json.dump(consolidated_data_opt, f, indent=2)
 
 print("\n" + "=" * 70)
 print(
-    f"All buildings peak demand data saved to: Results/schedules/central_optimisation_all_buildings_peak_demand.json"
+    f"Consolidated data (single building + all buildings peak demand) saved to: Results/schedules/central_optimisation_all_buildings_peak_demand.json"
 )
 print("=" * 70)

@@ -15,5 +15,5 @@ __pycache__
 #Ignore Huge dataset
 data/
 IDEAL Dataset/
-pyDcop/
+
 y/

@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-weights = np.linspace(0, 500, 10)
+weights = np.linspace(0, 1, 20)
 
 delta_T = np.linspace(-5, 5, 200)
 

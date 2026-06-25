@@ -52,7 +52,7 @@ cop = np.ones(time_horizon) * 2.18
 T_init = 20.0
 max_thermal_power = 20.0  # kW
 efficiency = 0.9  # Boiler efficiency (fraction)
-gas_price = 5  # Gas price (p/kWh)
+gas_price = 10  # Gas price (p/kWh)
 hp_max_power = 10.0  # Maximum heat pump electrical power (kW)
 
 # ---- Sets ----
@@ -60,7 +60,7 @@ model.buildings = pyo.RangeSet(0, n_buildings - 1)  # buildings
 model.t = pyo.RangeSet(0, time_horizon - 1)
 dt = 1.0
 model.dt = pyo.Param(initialize=dt)
-alpha = 0.5
+alpha = 1
 
 # ---- Parameters ----
 
@@ -89,7 +89,7 @@ model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 # Electrical variables
 model.p_el_vars = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, hp_max_power))  # heat pump electrical power
-
+model.P_peak = pyo.Var(bounds=(0, None))
 # Heat pump and boiler variables
 model.q_heat_vars = pyo.Var(
     model.buildings,
@@ -102,6 +102,9 @@ model.f = pyo.Var(model.buildings, model.t, bounds=(0, 1), initialize=0.5)
 model.q_heat = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=0)
 model.gas_consumption = pyo.Var(model.buildings, model.t, domain=pyo.Reals, bounds=(0, None), initialize=0)
 model.q_boiler_vars = pyo.Var(model.buildings, model.t, bounds=(0, max_thermal_power), initialize=0)
+
+# Peak gas consumption variable
+model.P_gas_peak = pyo.Var(bounds=(0, None))
 
 # Thermal variables
 model.T_in = pyo.Var(model.buildings, model.t, bounds=(0, None), initialize=T_init)
@@ -128,6 +131,7 @@ model.T_set = pyo.Param(
 
 model.C = pyo.Param(model.buildings, initialize={b: 10 for b in model.buildings})
 model.U = pyo.Param(model.buildings, initialize={b: 0.5 for b in model.buildings})
+
 
 # ============================================================================
 # CONSTRAINT DEFINITIONS
@@ -267,32 +271,195 @@ def thermal_dynamics_rule(model, b, t):
 model.thermal_dynamics = pyo.Constraint(model.buildings, model.t, rule=thermal_dynamics_rule)
 
 
+def peak_rule(model, t):
+    return sum(model.p_el_vars[b, t] for b in model.buildings) <= model.P_peak
+
+
+model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
+
+
+# def peak_gas_rule(model, t):
+#     """Peak gas consumption limit"""
+#     return sum(model.gas_consumption[b, t] for b in model.buildings) <= model.P_gas_peak
+
+
+# model.peak_gas_constraint = pyo.Constraint(model.t, rule=peak_gas_rule)
 # ============================================================================
 # OBJECTIVE FUNCTION
 # ============================================================================
 
+# =====================================================================
+# ADMM PARAMETERS
+# =====================================================================
+
+rho = 10000.0  # Increased from 100 to force stronger consensus
+max_iter = 100
+tol = 1e-2
+
+# Define lam and z as Pyomo Params so they can be updated in the loop
+model.lam = pyo.Param(model.t, initialize=0.0, mutable=True)
+model.z = pyo.Param(model.t, initialize=0.0, mutable=True)
+
+# Keep Python arrays for residual calculations
+z_py = np.zeros(time_horizon)
+lam_py = np.zeros(time_horizon)
+
+# =====================================================================
+# MODIFY OBJECTIVE FOR ADMM
+# =====================================================================
+
 
 def objective_rule(model):
-    """Minimize total cost: electricity + gas + temperature deviation penalty"""
-    return sum(
-        data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
-        + gas_price / 100 * model.gas_consumption[b, t] * model.dt
-        + alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
-        for b in model.buildings
-        for t in model.t
-    )
+    total_cost = 0
+    for t in model.t:
+        total_cost += model.P_peak  # explicit peak electricity minimization
+        # total_cost += model.P_gas_peak  # explicit peak gas minimization
+        for b in model.buildings:
+            # energy costs
+            total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
+            total_cost += gas_price / 100 * model.gas_consumption[b, t] * model.dt
+            # thermal comfort penalty
+            total_cost += alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
+            # ADMM consensus penalty
+            total_cost += model.lam[t] * model.p_el_vars[b, t] + (rho / 2) * (model.p_el_vars[b, t] - model.z[t]) ** 2
+
+    return total_cost
 
 
 model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-# ============================================================================
-# SOLVE
-# ============================================================================
-
 solver = pyo.SolverFactory("gurobi_direct")
-result = solver.solve(model, tee=True, logfile="Results/Temp_setpoint/solver_log.txt")
+solver.options["LogFile"] = ""
+# =====================================================================
+# ADMM LOOP
+# =====================================================================
 
-log_infeasible_constraints(model)
+# Track residuals for convergence plot
+primal_residuals = []
+dual_residuals = []
+iterations = []
+
+for k in range(max_iter):
+
+    print(f"\n========== ADMM Iteration {k} ==========")
+
+    # ---- Solve local problems with current dual variables and consensus ----
+    solver.solve(model, tee=False)
+
+    # ---- Collect building imports ----
+    p_vals = np.array([[pyo.value(model.p_el_vars[b, t]) for t in model.t] for b in model.buildings])
+
+    total_import = p_vals.sum(axis=0)
+
+    # ---- z update (consensus) ----
+    z_new = total_import / n_buildings
+    # Simple projection to enforce peak constraint
+
+    # ---- convergence check (before updating) ----
+    # Primal residual: how much do individual imports deviate from consensus?
+    primal_res = np.linalg.norm(p_vals - z_new)
+    # Dual residual: is the consensus variable changing?
+    dual_res = np.linalg.norm(z_new - z_py) * rho
+
+    print("Primal residual:", primal_res)
+    print("Dual residual:", dual_res)
+    print("Consensus z:", z_new[:5], "...")  # Print first 5 values for debugging
+
+    # Store residuals for plotting
+    primal_residuals.append(primal_res)
+    dual_residuals.append(dual_res)
+    iterations.append(k)
+
+    # ---- dual and consensus update ----
+    lam_py[:] = lam_py + rho * np.mean(p_vals - z_new, axis=0)  # Average violation across buildings
+    z_py[:] = z_new
+
+    # Update Pyomo Params
+    for t in model.t:
+        model.lam[t].set_value(lam_py[t])
+        model.z[t].set_value(z_py[t])
+
+    if primal_res < tol and dual_res < tol:
+        print("ADMM converged")
+        break
+
+# ============================================================================
+# PLOT CONVERGENCE
+# ============================================================================
+
+import matplotlib.pyplot as plt
+
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+
+# Plot primal residual
+ax1.semilogy(iterations, primal_residuals, "b-o", linewidth=2, markersize=6, label="Primal Residual")
+ax1.axhline(y=tol, color="r", linestyle="--", linewidth=2, label=f"Tolerance = {tol}")
+ax1.set_xlabel("Iteration", fontsize=12)
+ax1.set_ylabel("Primal Residual ||p - z||", fontsize=12)
+ax1.set_title("Primal Residual Convergence", fontsize=14, fontweight="bold")
+ax1.grid(True, alpha=0.3)
+ax1.legend(fontsize=11)
+
+# Plot dual residual
+ax2.semilogy(iterations, dual_residuals, "g-s", linewidth=2, markersize=6, label="Dual Residual")
+ax2.axhline(y=tol, color="r", linestyle="--", linewidth=2, label=f"Tolerance = {tol}")
+ax2.set_xlabel("Iteration", fontsize=12)
+ax2.set_ylabel("Dual Residual ρ||z - z_prev||", fontsize=12)
+ax2.set_title("Dual Residual Convergence", fontsize=14, fontweight="bold")
+ax2.grid(True, alpha=0.3)
+ax2.legend(fontsize=11)
+
+# Combined plot to see trade-off
+ax3.semilogy(iterations, primal_residuals, "b-o", linewidth=2, markersize=6, label="Primal ||p - z||")
+ax3.semilogy(iterations, dual_residuals, "g-s", linewidth=2, markersize=6, label="Dual ρ||z - z_prev||")
+ax3.axhline(y=tol, color="r", linestyle="--", linewidth=2, label=f"Tolerance = {tol}")
+ax3.set_xlabel("Iteration", fontsize=12)
+ax3.set_ylabel("Residual Value (log scale)", fontsize=12)
+ax3.set_title("Primal vs Dual Residuals (Trade-off Check)", fontsize=14, fontweight="bold")
+ax3.grid(True, alpha=0.3)
+ax3.legend(fontsize=11)
+
+plt.tight_layout()
+plt.savefig("Results/ADMM_convergence.png", dpi=300, bbox_inches="tight")
+print("\nConvergence plot saved to Results/ADMM_convergence.png")
+plt.show()
+
+# Print convergence summary
+print(f"\n{'='*60}")
+print("ADMM CONVERGENCE SUMMARY")
+print(f"{'='*60}")
+print(f"Iterations completed: {len(iterations)}")
+print(f"Initial primal residual: {primal_residuals[0]:.6e}")
+print(f"Final primal residual: {primal_residuals[-1]:.6e}")
+print(f"Initial dual residual: {dual_residuals[0]:.6e}")
+print(f"Final dual residual: {dual_residuals[-1]:.6e}")
+print(f"Tolerance: {tol}")
+print(f"Converged: {primal_residuals[-1] < tol and dual_residuals[-1] < tol}")
+
+# Trade-off analysis
+print(f"\n{'--- TRADE-OFF ANALYSIS ---'}")
+primal_reduction = (
+    (primal_residuals[0] - primal_residuals[-1]) / primal_residuals[0] * 100 if primal_residuals[0] > 0 else 0
+)
+dual_reduction = (dual_residuals[0] - dual_residuals[-1]) / dual_residuals[0] * 100 if dual_residuals[0] > 0 else 0
+print(f"Primal reduction: {primal_reduction:.1f}%")
+print(f"Dual reduction: {dual_reduction:.1f}%")
+print(f"Final primal/dual ratio: {primal_residuals[-1] / max(dual_residuals[-1], 1e-10):.2f} (>1 = primal worse)")
+
+# Check for trade-off pattern
+late_iterations = min(10, len(iterations) // 2)
+primal_change = primal_residuals[-1] - primal_residuals[-late_iterations]
+dual_change = dual_residuals[-1] - dual_residuals[-late_iterations]
+if primal_change > 0 and dual_change < 0:
+    print(f"⚠️  TRADE-OFF DETECTED: Primal increasing while dual decreasing (rho too high)")
+elif primal_change > 0.1 * primal_residuals[-late_iterations]:
+    print(f"✓ Primal plateaued (no consensus reached)")
+elif dual_change < 0 and primal_change < 0.01:
+    print(f"✓ Algorithm stable but consensus imperfect (normal for high rho)")
+else:
+    print(f"✓ Both residuals improving or stable")
+
+print(f"{'='*60}\n")
 
 # ============================================================================
 # EXTRACT RESULTS
@@ -330,17 +497,17 @@ fig = make_subplots(
 for b in model.buildings:
     row = b + 1
 
-    # Electricity & Gas costs (only charge for positive imports, not exports)
+    # Electricity & Gas costs
     elec_cost_b_schedule = [
         data["price"].values[t]
-        * max(
-            0,
+        * (
             pyo.value(model.p_hp[b, t])
             + pyo.value(model.charge[b, t])
             - pyo.value(model.discharge[b, t])
             - pyo.value(model.pv_supply[b, t])
-            + model.electric_load[b, t],
+            + model.electric_load[b, t]
         )
+        * 1
         for t in model.t
     ]
 
@@ -498,155 +665,3 @@ for b in model.buildings:
     fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
 
 fig.show()
-
-# ============================================================================
-# SAVE RESULTS TO JSON FOR BUILDING 0
-# ============================================================================
-
-b = 0  # Save results for building 0
-
-# Calculate peak demand metrics for building 0
-grid_import_b = grid_import_schedule[b]
-total_heat_demand_b = q_total_schedule[b]
-charge_b = charge_schedule[b]
-discharge_b = discharge_schedule[b]
-heatpump_output_b = q_heatpump_schedule[b]
-boiler_output_b = q_boiler_schedule[b]
-
-peak_electricity_demand = np.max(grid_import_b)
-time_of_peak_electricity_demand = int(np.argmax(grid_import_b))
-average_electricity_demand = np.mean(grid_import_b)
-peak_heat_pump_output = np.max(heatpump_output_b)
-
-
-output_data = {
-    "parameters": {
-        "time_horizon_hours": int(time_horizon),
-        "delta_t_hours": float(delta_t),
-        "battery_capacity_kwh": float(battery_capacity),
-        "max_power_kw": float(max_power),
-        "eta_charge": float(eta_charge),
-        "eta_discharge": float(eta_discharge),
-        "p_th_nom": float(p_th_nom),
-        "T_ref_celsius": float(T_ref),
-        "cop": float(cop[0]),
-        "T_init_celsius": float(T_init),
-        "max_thermal_power_kw": float(max_thermal_power),
-        "boiler_efficiency": float(efficiency),
-        "gas_price_p_per_kwh": float(gas_price),
-        "hp_max_power_kw": float(hp_max_power),
-        "thermal_capacity_kwh_per_celsius": 10.0,
-        "thermal_conductance_kw_per_celsius": 0.5,
-        "temperature_deviation_penalty_alpha": 0.5,
-    },
-    "battery_charge_schedule": charge_schedule[b].tolist(),
-    "battery_discharge_schedule": discharge_schedule[b].tolist(),
-    "battery_soc_schedule": soc_schedule[b].tolist(),
-    "heatpump_thermal_output": q_heatpump_schedule[b].tolist(),
-    "boiler_thermal_output": q_boiler_schedule[b].tolist(),
-    "indoor_temperature": T_in.tolist(),
-    "temperature_setpoint": T_set[b].tolist() if isinstance(T_set[b], np.ndarray) else T_set[b],
-    "outdoor_temperature": T_out[b].tolist() if isinstance(T_out[b], np.ndarray) else T_out[b],
-    "electricity_price": data_hr["price"].values.tolist(),
-    "electricity_costs": [
-        float(c)
-        for c in [data_hr["price"].values[t] * max(0, grid_import_schedule[b][t]) for t in range(time_horizon)]
-    ],
-    "gas_costs": [gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) for t in model.t],
-    "total_costs": [electricity_costs[b] / time_horizon, gas_costs[b] / time_horizon],  # Per time step
-    "load": load_schedule[b].tolist(),
-    "pv_supply": pv_schedule[b].tolist(),
-    "battery_net_charge": net_charge_schedule[b].tolist(),
-    "heatpump_electrical": heatpump_schedule[b].tolist(),
-    "grid_import": grid_import_schedule[b].tolist(),
-    "total_heat_demand": q_total_schedule[b].tolist(),
-    "peak_demand": {
-        "peak_electricity_demand_kw": float(peak_electricity_demand),
-        "time_of_peak_electricity_demand_hour": time_of_peak_electricity_demand,
-        "average_electricity_demand_kw": float(average_electricity_demand),
-        "peak_heat_pump_output_kw": float(peak_heat_pump_output),
-    },
-    "costs": {
-        "total_electricity_cost_gbp": float(electricity_costs[b]),
-        "total_gas_cost_gbp": float(gas_costs[b]),
-        "total_cost_gbp": float(total_costs[b]),
-    },
-}
-
-with open("Results/schedules/central_optimisation_schedules_and_costs.json", "w") as f:
-    json.dump(output_data, f, indent=2)
-
-print("\nCentral optimization results saved to: Results/schedules/central_optimisation_schedules_and_costs.json")
-print(f"Building 0 Summary:")
-print(f"Total Electricity Cost: £{electricity_costs[b]:.2f}")
-print(f"Total Gas Cost: £{gas_costs[b]:.2f}")
-print(f"Total Cost: £{total_costs[b]:.2f}")
-
-# ============================================================================
-# SAVE TOTAL DEMAND VS TIME DATA
-# ============================================================================
-
-demand_vs_time = {
-    "time_hours": list(range(time_horizon)),
-    "building": cols[0],
-    "total_electricity_demand_kw": grid_import_schedule[0].tolist(),
-    "total_thermal_demand_kw": q_total_schedule[0].tolist(),
-    "load_kw": load_schedule[0].tolist(),
-    "pv_supply_kw": pv_schedule[0].tolist(),
-    "battery_net_charge_kw": net_charge_schedule[0].tolist(),
-    "heatpump_electrical_kw": heatpump_schedule[0].tolist(),
-    "boiler_thermal_kw": q_boiler_schedule[0].tolist(),
-    "heatpump_thermal_kw": q_heatpump_schedule[0].tolist(),
-}
-
-with open("Results/schedules/central_optimisation_demand_vs_time.json", "w") as f:
-    json.dump(demand_vs_time, f, indent=2)
-
-print("Demand vs time data saved to: Results/schedules/central_optimisation_demand_vs_time.json")
-
-# ============================================================================
-# MULTI-BUILDING PEAK DEMAND ANALYSIS
-# ============================================================================
-# Process all buildings from optimization results and save their peak demand information
-
-print("\n" + "=" * 70)
-print("MULTI-BUILDING PEAK DEMAND ANALYSIS (OPTIMIZED)")
-print("=" * 70)
-
-all_buildings_peak_demand_opt = {}
-
-for b in model.buildings:
-    grid_import_b = grid_import_schedule[b]
-    total_heat_demand_b = q_total_schedule[b]
-    charge_b = charge_schedule[b]
-    discharge_b = discharge_schedule[b]
-    heatpump_output_b = q_heatpump_schedule[b]
-    boiler_output_b = q_boiler_schedule[b]
-
-    # Calculate peak metrics
-    peak_electricity_demand = np.max(grid_import_b)
-    time_of_peak_electricity = int(np.argmax(grid_import_b))
-    peak_heat_pump_output = np.max(heatpump_output_b)
-
-    # Store building data
-    all_buildings_peak_demand_opt[cols[b]] = {
-        "peak_electricity_demand_kw": float(peak_electricity_demand),
-        "time_of_peak_electricity_demand_hour": time_of_peak_electricity,
-        "average_electricity_demand_kw": float(average_electricity_demand),
-        "peak_heat_pump_output_kw": float(peak_heat_pump_output),
-    }
-
-    print(f"\nBuilding {b}: {cols[b]}")
-    print(f"  Peak Electricity: {peak_electricity_demand:.2f} kW (hour {time_of_peak_electricity})")
-    print(f"  Avg Electricity: {average_electricity_demand:.2f} kW")
-
-print(all_buildings_peak_demand_opt)
-# Save all buildings peak demand data to JSON
-with open("Results/schedules/central_optimisation_all_buildings_peak_demand.json", "w") as f:
-    json.dump(all_buildings_peak_demand_opt, f, indent=2)
-
-print("\n" + "=" * 70)
-print(
-    f"All buildings peak demand data saved to: Results/schedules/central_optimisation_all_buildings_peak_demand.json"
-)
-print("=" * 70)

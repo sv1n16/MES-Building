@@ -90,6 +90,13 @@ model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 model.p_el_vars = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, hp_max_power))  # heat pump electrical power
 model.P_peak = pyo.Var(bounds=(0, None))
+# Energy sharing variables (exported to / imported from the common pool)
+model.share_export = pyo.Var(model.buildings, model.t, bounds=(0, None))
+model.share_import = pyo.Var(model.buildings, model.t, bounds=(0, None))
+
+# Fixed sharing cost (per kWh) — set lower than grid price (user can adjust)
+share_cost = 0.8 * float(data_hr["price"].mean())
+model.share_cost = pyo.Param(initialize=share_cost)
 # Heat pump and boiler variables
 model.q_heat_vars = pyo.Var(
     model.buildings,
@@ -235,13 +242,15 @@ model.gas_consumption_calc = pyo.Constraint(model.buildings, model.t, rule=gas_c
 
 
 def electricity_balance_rule(model, b, t):
-    """Electricity balance: grid import = load + charging - PV - discharging + heat pump"""
+    """Electricity balance: grid import = load + charging - PV - discharging + heat pump - exports + imports"""
     return model.p_el_vars[b, t] == (
         model.electric_load[b, t]
         + model.charge[b, t]
         - model.pv_supply[b, t]
         - model.discharge[b, t]
         + model.p_hp[b, t]
+        + model.share_import[b, t]
+        - model.share_export[b, t]
     )
 
 
@@ -278,6 +287,16 @@ def peak_rule(model, t):
 model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
 
 
+def sharing_balance_rule(model, t):
+    """Conservation of shared energy across buildings at each time step"""
+    return sum(model.share_import[b, t] for b in model.buildings) == sum(
+        model.share_export[b, t] for b in model.buildings
+    )
+
+
+model.sharing_balance = pyo.Constraint(model.t, rule=sharing_balance_rule)
+
+
 # def peak_gas_rule(model, t):
 #     """Peak gas consumption limit"""
 #     return sum(model.gas_consumption[b, t] for b in model.buildings) <= model.P_gas_peak
@@ -293,16 +312,23 @@ model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
 # =====================================================================
 
 rho = 10000.0  # Increased from 100 to force stronger consensus
-max_iter = 1000
+max_iter = 100
 tol = 1e-2
 
-# Define lam and z as Pyomo Params so they can be updated in the loop
-model.lam = pyo.Param(model.t, initialize=0.0, mutable=True)
+# Define lam (per-building duals) and z as Pyomo Params so they can be updated in the loop
+# `lam` is now indexed by building and time: one dual for each consensus constraint `p_b,t - z_t = 0`.
+model.lam = pyo.Param(
+    model.buildings,
+    model.t,
+    initialize={(b, t): 0.0 for b in model.buildings for t in model.t},
+    mutable=True,
+)
 model.z = pyo.Param(model.t, initialize=0.0, mutable=True)
 
 # Keep Python arrays for residual calculations
 z_py = np.zeros(time_horizon)
-lam_py = np.zeros(time_horizon)
+# lam_py stores per-building duals: shape (n_buildings, time_horizon)
+lam_py = np.zeros((n_buildings, time_horizon))
 
 # =====================================================================
 # MODIFY OBJECTIVE FOR ADMM
@@ -312,16 +338,18 @@ lam_py = np.zeros(time_horizon)
 def objective_rule(model):
     total_cost = 0
     for t in model.t:
-        total_cost += model.P_peak  # explicit peak electricity minimization
+        # total_cost += model.P_peak  # explicit peak electricity minimization
         # total_cost += model.P_gas_peak  # explicit peak gas minimization
         for b in model.buildings:
-            # energy costs
-            total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt
-            total_cost += gas_price / 100 * model.gas_consumption[b, t] * model.dt
+            # energy costs: grid imports
+            total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt  # electricity cost from grid
+            # cost for energy imported through sharing pool (fixed, lower than grid price)
+            total_cost += model.share_cost * model.share_import[b, t] * model.dt
+            total_cost += gas_price / 100 * model.gas_consumption[b, t] * model.dt  # gas cost
             # thermal comfort penalty
             total_cost += alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
-            # ADMM consensus penalty
-            total_cost += model.lam[t] * model.p_el_vars[b, t] + (rho / 2) * (model.p_el_vars[b, t] - model.z[t]) ** 2
+            # ADMM consensus penalty (on grid imports) using per-building duals `lam[b,t]`
+            total_cost += model.lam[b, t] * model.p_el_vars[b, t] + (rho / 2) * (model.p_el_vars[b, t] - model.z[t]) ** 2
 
     return total_cost
 
@@ -352,8 +380,9 @@ for k in range(max_iter):
     total_import = p_vals.sum(axis=0)
 
     # ---- z update (consensus) ----
-    z_new = total_import / n_buildings
-    # Simple projection to enforce peak constraint
+    # With per-building duals the optimal z minimizes sum_b (rho/2)||p_b - z + lam_b/rho||^2
+    # Closed form: z = (1/n) * sum_b (p_b + lam_b / rho)
+    z_new = np.sum(p_vals + lam_py / rho, axis=0) / n_buildings
 
     # ---- convergence check (before updating) ----
     # Primal residual: how much do individual imports deviate from consensus?
@@ -371,13 +400,16 @@ for k in range(max_iter):
     iterations.append(k)
 
     # ---- dual and consensus update ----
-    lam_py[:] = lam_py + rho * np.mean(p_vals - z_new, axis=0)  # Average violation across buildings
+    # Update per-building duals: y_b := y_b + rho * (p_b - z)
+    lam_py = lam_py + rho * (p_vals - z_new)
     z_py[:] = z_new
 
-    # Update Pyomo Params
+    # Update Pyomo Params for both lam[b,t] and z[t]
+    for b in model.buildings:
+        for t in model.t:
+            model.lam[b, t].set_value(float(lam_py[b, t]))
     for t in model.t:
-        model.lam[t].set_value(lam_py[t])
-        model.z[t].set_value(z_py[t])
+        model.z[t].set_value(float(z_py[t]))
 
     if primal_res < tol and dual_res < tol:
         print("ADMM converged")
@@ -473,6 +505,8 @@ grid_import_schedule = np.array([[pyo.value(model.p_el_vars[b, t]) for t in mode
 heatpump_schedule = np.array([[pyo.value(model.p_hp[b, t]) for t in model.t] for b in model.buildings])
 pv_schedule = np.array([[model.pv_supply[b, t] for t in model.t] for b in model.buildings])
 load_schedule = np.array([[model.electric_load[b, t] for t in model.t] for b in model.buildings])
+share_import_schedule = np.array([[pyo.value(model.share_import[b, t]) for t in model.t] for b in model.buildings])
+share_export_schedule = np.array([[pyo.value(model.share_export[b, t]) for t in model.t] for b in model.buildings])
 charging_state_schedule = np.array([[pyo.value(model.charging_state[b, t]) for t in model.t] for b in model.buildings])
 T_in = [[pyo.value(model.T_in[b, t]) for t in model.t] for b in model.buildings]
 T_out = [[pyo.value(model.T_out[b, t]) for t in model.t] for b in model.buildings]
@@ -498,16 +532,10 @@ for b in model.buildings:
     row = b + 1
 
     # Electricity & Gas costs
+    # Electricity costs: grid imports priced at time-varying tariff + fixed sharing cost for pooled imports
     elec_cost_b_schedule = [
-        data["price"].values[t]
-        * (
-            pyo.value(model.p_hp[b, t])
-            + pyo.value(model.charge[b, t])
-            - pyo.value(model.discharge[b, t])
-            - pyo.value(model.pv_supply[b, t])
-            + model.electric_load[b, t]
-        )
-        * 1
+        data_hr["price"].values[t] * pyo.value(model.p_el_vars[b, t])
+        + pyo.value(model.share_cost) * pyo.value(model.share_import[b, t])
         for t in model.t
     ]
 

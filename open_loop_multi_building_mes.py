@@ -32,21 +32,21 @@ data_hr["temperature setpoint"] = data.groupby("hour")["temperature setpoint"].m
 for c in cols:
     data_hr[c] = data.groupby("hour")[c].max()
 
-# Parameters
+# Parameters (matching central_optimisation_all_buildings_peak_demand.json)
 time_horizon = len(data_hr)
-delta_t = 1
+delta_t = 1.0
 battery_capacity = 12.0
 max_power = 4.6
 eta_charge = 0.9
 eta_discharge = 0.9
-p_th_nom = 12
-T_ref = 7
+p_th_nom = 12.0
+T_ref = 7.0
 cop = np.ones(time_horizon) * 2.18
 T_init = 20.0
 max_thermal_power = 20.0
 efficiency = 0.9
-gas_price = 5
-hp_max_power = 12.0
+gas_price = 5.0
+hp_max_power = 10.0
 
 C = 10.0
 U = 0.5
@@ -63,6 +63,28 @@ p_el_charge = np.minimum(p_el_charge, max_power)
 p_el_discharge = np.minimum(p_el_discharge, max_power)
 
 heat_load = np.maximum(0, 2.0 * (temperature_setpoint - outdoor_temperature) / 10)
+
+# ============================================================================
+# LOAD INITIAL CONDITIONS FROM CENTRAL OPTIMISATION
+# ============================================================================
+
+# Load initial conditions from central optimisation JSON
+with open("Results/schedules/central_optimisation_all_buildings_peak_demand.json", "r") as f:
+    central_opt_data = json.load(f)
+
+# Extract initial conditions for each building
+initial_T_in = {}
+initial_soc = {}
+for b, building_col in enumerate(cols):
+    building_data = central_opt_data["all_buildings_peak_demand"].get(building_col, {})
+    initial_conditions = building_data.get("initial_conditions", {})
+    initial_T_in[b] = float(initial_conditions.get("initial_indoor_temperature_celsius", 20.0))
+    initial_soc[b] = float(initial_conditions.get("initial_battery_soc_kwh", 0.8 * battery_capacity))
+
+print(f"\nInitial conditions loaded from central_optimisation_all_buildings_peak_demand.json:")
+for b in range(len(cols)):
+    print(f"  Building {b}: Temperature {initial_T_in[b]:.2f}°C, Battery SOC {initial_soc[b]:.2f} kWh")
+
 # ==============================================================
 # MULTI-BUILDING PEAK DEMAND ANALYSIS
 # ============================================================================
@@ -96,7 +118,7 @@ for b, building_col in enumerate(cols):
     p_th_heat_boiler_b = np.zeros(time_horizon)
 
     indoor_temperature = np.zeros(time_horizon)
-    indoor_temperature[0] = T_init
+    indoor_temperature[0] = initial_T_in[b]
     required_heat = np.zeros(time_horizon)
 
     for t in range(time_horizon):
@@ -145,7 +167,7 @@ for b, building_col in enumerate(cols):
     print(f"Gas Costs: £{gas_costs:.2f}")
     print(f"Total costs (electricity + gas): £{total_costs:.2f}")
     T_in_b = np.zeros(time_horizon)
-    T_in_b[0] = T_init
+    T_in_b[0] = initial_T_in[b]
     for t in range(time_horizon - 1):
         T_in_b[t + 1] = (
             T_in_b[t]
@@ -162,6 +184,10 @@ for b, building_col in enumerate(cols):
     average_electricity_demand = np.mean(grid_import_b)
 
     all_buildings_peak_demand[cols[b]] = {
+        "initial_conditions": {
+            "initial_indoor_temperature_celsius": float(initial_T_in[b]),
+            "initial_battery_soc_kwh": float(initial_soc[b]),
+        },
         "parameters": {
             "time_horizon_hours": int(time_horizon),
             "delta_t_hours": float(delta_t),
@@ -198,6 +224,7 @@ for b, building_col in enumerate(cols):
             "heatpump_thermal_output": p_th_heat_hp_b.tolist(),
             "boiler_thermal_output": p_th_heat_boiler_b.tolist(),
             "indoor_temperature": T_in_b.tolist(),
+            "temperature_setpoint": temperature_setpoint.tolist(),
             "electricity_costs": [float(price[t] * grid_import_b[t]) for t in range(time_horizon)],
         },
     }
