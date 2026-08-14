@@ -2,7 +2,6 @@ from gurobipy import Model, GRB
 import pyomo.environ as pyo
 import json
 import numpy as np
-import os
 import pandas as pd
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
@@ -19,7 +18,7 @@ cols = data.columns[data.columns.str.contains("consumption", case=False)]
 consumption_data = data[cols]
 
 # Get top 3 column names by total consumption
-top3_consumers = consumption_data.sum().sort_values(ascending=False).head(5).index.tolist()
+top3_consumers = consumption_data.sum().sort_values(ascending=False).head(4).index.tolist()
 cols = top3_consumers  # all building consumption columns
 
 data["price"] = data["price (p/kwh)"] / 100.0
@@ -91,13 +90,6 @@ model.charging_state = pyo.Var(model.buildings, model.t, domain=pyo.Binary)
 model.p_el_vars = pyo.Var(model.buildings, model.t, bounds=(0, None))  # imported electricity from grid
 model.p_hp = pyo.Var(model.buildings, model.t, bounds=(0, hp_max_power))  # heat pump electrical power
 model.P_peak = pyo.Var(bounds=(0, None))
-# Energy sharing variables (exported to / imported from the common pool)
-model.share_export = pyo.Var(model.buildings, model.t, bounds=(0, None))
-model.share_import = pyo.Var(model.buildings, model.t, bounds=(0, None))
-
-# Fixed sharing cost (per kWh) — set lower than grid price (user can adjust)
-share_cost = 0.8 * float(data_hr["price"].mean())
-model.share_cost = pyo.Param(initialize=share_cost)
 # Heat pump and boiler variables
 model.q_heat_vars = pyo.Var(
     model.buildings,
@@ -243,15 +235,13 @@ model.gas_consumption_calc = pyo.Constraint(model.buildings, model.t, rule=gas_c
 
 
 def electricity_balance_rule(model, b, t):
-    """Electricity balance: grid import = load + charging - PV - discharging + heat pump - exports + imports"""
+    """Electricity balance: grid import = load + charging - PV - discharging + heat pump"""
     return model.p_el_vars[b, t] == (
         model.electric_load[b, t]
         + model.charge[b, t]
         - model.pv_supply[b, t]
         - model.discharge[b, t]
         + model.p_hp[b, t]
-        + model.share_import[b, t]
-        - model.share_export[b, t]
     )
 
 
@@ -281,21 +271,11 @@ def thermal_dynamics_rule(model, b, t):
 model.thermal_dynamics = pyo.Constraint(model.buildings, model.t, rule=thermal_dynamics_rule)
 
 
-# def peak_rule(model, t):
-#     return sum(model.p_el_vars[b, t] for b in model.buildings) <= model.P_peak
+def peak_rule(model, t):
+    return sum(model.p_el_vars[b, t] for b in model.buildings) <= model.P_peak
 
 
-# model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
-
-
-def sharing_balance_rule(model, t):
-    """Conservation of shared energy across buildings at each time step"""
-    return sum(model.share_import[b, t] for b in model.buildings) == sum(
-        model.share_export[b, t] for b in model.buildings
-    )
-
-
-model.sharing_balance = pyo.Constraint(model.t, rule=sharing_balance_rule)
+model.peak_constraint = pyo.Constraint(model.t, rule=peak_rule)
 
 
 # def peak_gas_rule(model, t):
@@ -312,24 +292,17 @@ model.sharing_balance = pyo.Constraint(model.t, rule=sharing_balance_rule)
 # ADMM PARAMETERS
 # =====================================================================
 
-rho = 1 # Increased from 100 to force stronger consensus
-max_iter = 10000
-tol = 1e-3
+rho = 10000.0  # Increased from 100 to force stronger consensus
+max_iter = 100
+tol = 1e-2
 
-# Define lam (per-building duals) and z as Pyomo Params so they can be updated in the loop
-# `lam` is now indexed by building and time: one dual for each consensus constraint `p_b,t - z_t = 0`.
-model.lam = pyo.Param(
-    model.buildings,
-    model.t,
-    initialize={(b, t): 0.0 for b in model.buildings for t in model.t},
-    mutable=True,
-)
+# Define lam and z as Pyomo Params so they can be updated in the loop
+model.lam = pyo.Param(model.t, initialize=0.0, mutable=True)
 model.z = pyo.Param(model.t, initialize=0.0, mutable=True)
 
 # Keep Python arrays for residual calculations
 z_py = np.zeros(time_horizon)
-# lam_py stores per-building duals: shape (n_buildings, time_horizon)
-lam_py = np.zeros((n_buildings, time_horizon))
+lam_py = np.zeros(time_horizon)
 
 # =====================================================================
 # MODIFY OBJECTIVE FOR ADMM
@@ -338,21 +311,17 @@ lam_py = np.zeros((n_buildings, time_horizon))
 
 def objective_rule(model):
     total_cost = 0
-
     for t in model.t:
         # total_cost += model.P_peak  # explicit peak electricity minimization
         # total_cost += model.P_gas_peak  # explicit peak gas minimization
         for b in model.buildings:
-            net_trade = model.share_export[b, t] - model.share_import[b, t]
-            # energy costs: grid imports
-            total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt  # electricity cost from grid
-            # cost for energy imported through sharing pool (fixed, lower than grid price)
-            total_cost += model.share_cost * model.share_import[b, t] * model.dt
-            total_cost += gas_price / 100 * model.gas_consumption[b, t] * model.dt  # gas cost
+            # energy costs
+            total_cost += data_hr["price"][t] * model.p_el_vars[b, t] * model.dt # electricity cost
+            total_cost += gas_price / 100 * model.gas_consumption[b, t] * model.dt # gas cost
             # thermal comfort penalty
             total_cost += alpha * (model.T_in[b, t] - model.T_set[b, t]) ** 2
-            # ADMM consensus penalty (on grid imports) using per-building duals `lam[b,t]`
-            total_cost += (model.lam[b, t] * (net_trade - model.z[t]) + (rho / 2) * (net_trade - model.z[t]) ** 2)
+            # ADMM consensus penalty
+            total_cost += model.lam[t] * model.p_el_vars[b, t] + (rho / 2) * (model.p_el_vars[b, t] - model.z[t]) ** 2
 
     return total_cost
 
@@ -376,28 +345,21 @@ for k in range(max_iter):
 
     # ---- Solve local problems with current dual variables and consensus ----
     solver.solve(model, tee=False)
-    
+
     # ---- Collect building imports ----
-    trade_vals = np.array([
-    [
-        pyo.value(model.share_export[b, t]) -
-        pyo.value(model.share_import[b, t])
-        for t in model.t
-    ]
-    for b in model.buildings
-])
-    total_import = trade_vals.sum(axis=0)
+    p_vals = np.array([[pyo.value(model.p_el_vars[b, t]) for t in model.t] for b in model.buildings])
+
+    total_import = p_vals.sum(axis=0)
 
     # ---- z update (consensus) ----
-    # With per-building duals the optimal z minimizes sum_b (rho/2)||p_b - z + lam_b/rho||^2
-    # Closed form: z = (1/n) * sum_b (p_b + lam_b / rho)
-    z_new = np.mean(trade_vals , axis=0)
+    z_new = total_import / n_buildings
+    # Simple projection to enforce peak constraint
 
     # ---- convergence check (before updating) ----
     # Primal residual: how much do individual imports deviate from consensus?
-    primal_res = np.linalg.norm(trade_vals - z_new[None, :])
+    primal_res = np.linalg.norm(p_vals - z_new)
     # Dual residual: is the consensus variable changing?
-    dual_res = rho * np.linalg.norm(z_new - z_py)
+    dual_res = np.linalg.norm(z_new - z_py) * rho
 
     print("Primal residual:", primal_res)
     print("Dual residual:", dual_res)
@@ -409,29 +371,17 @@ for k in range(max_iter):
     iterations.append(k)
 
     # ---- dual and consensus update ----
-    # Update per-building duals: y_b := y_b + rho * (p_b - z)
-    lam_py = lam_py + rho * (trade_vals - z_new)
+    lam_py[:] = lam_py + rho * np.mean(p_vals - z_new, axis=0)  # Average violation across buildings
     z_py[:] = z_new
 
-    # Update Pyomo Params for both lam[b,t] and z[t]
-    for b in model.buildings:
-        for t in model.t:
-            model.lam[b, t].set_value(float(lam_py[b, t]))
+    # Update Pyomo Params
     for t in model.t:
-        model.z[t].set_value(float(z_py[t]))
+        model.lam[t].set_value(lam_py[t])
+        model.z[t].set_value(z_py[t])
 
     if primal_res < tol and dual_res < tol:
         print("ADMM converged")
         break
-
-# Save final model after optimisation
-os.makedirs("Results", exist_ok=True)
-try:
-    model_filename = "Results/ADMM_energy_sharing_model.lp"
-    model.write(model_filename, format="lp")
-    print(f"Saved optimisation model to {model_filename}")
-except Exception as e:
-    print(f"Could not save optimisation model: {e}")
 
 # ============================================================================
 # PLOT CONVERGENCE
@@ -523,8 +473,6 @@ grid_import_schedule = np.array([[pyo.value(model.p_el_vars[b, t]) for t in mode
 heatpump_schedule = np.array([[pyo.value(model.p_hp[b, t]) for t in model.t] for b in model.buildings])
 pv_schedule = np.array([[model.pv_supply[b, t] for t in model.t] for b in model.buildings])
 load_schedule = np.array([[model.electric_load[b, t] for t in model.t] for b in model.buildings])
-share_import_schedule = np.array([[pyo.value(model.share_import[b, t]) for t in model.t] for b in model.buildings])
-share_export_schedule = np.array([[pyo.value(model.share_export[b, t]) for t in model.t] for b in model.buildings])
 charging_state_schedule = np.array([[pyo.value(model.charging_state[b, t]) for t in model.t] for b in model.buildings])
 T_in = [[pyo.value(model.T_in[b, t]) for t in model.t] for b in model.buildings]
 T_out = [[pyo.value(model.T_out[b, t]) for t in model.t] for b in model.buildings]
@@ -550,10 +498,16 @@ for b in model.buildings:
     row = b + 1
 
     # Electricity & Gas costs
-    # Electricity costs: grid imports priced at time-varying tariff + fixed sharing cost for pooled imports
     elec_cost_b_schedule = [
-        data_hr["price"].values[t] * pyo.value(model.p_el_vars[b, t])
-        + pyo.value(model.share_cost) * pyo.value(model.share_import[b, t])
+        data["price"].values[t]
+        * (
+            pyo.value(model.p_hp[b, t])
+            + pyo.value(model.charge[b, t])
+            - pyo.value(model.discharge[b, t])
+            - pyo.value(model.pv_supply[b, t])
+            + model.electric_load[b, t]
+        )
+        * 1
         for t in model.t
     ]
 
@@ -711,144 +665,3 @@ for b in model.buildings:
     fig.update_yaxes(title_text="Cost (£)", title_font=dict(size=10), row=row, col=3)
 
 fig.show()
-
-# --- Print per-building totals and save results ---
-peak_grid_import = np.max(grid_import_schedule, axis=1)
-print("\nPer-building cost and peak grid import summary:")
-for b in model.buildings:
-    temp_deviation = np.mean(np.abs(np.array([pyo.value(model.T_in[b, t]) for t in model.t]) - np.array([model.T_set[b, t] for t in model.t])))
-    elec_cost_b = sum(
-        data_hr["price"].values[t] * pyo.value(model.p_el_vars[b, t]) + pyo.value(model.share_cost) * pyo.value(model.share_import[b, t])
-        for t in model.t
-    )
-    gas_cost_b = sum(gas_price / 100.0 * pyo.value(model.gas_consumption[b, t]) * model.dt for t in model.t)
-    total_cost_b = elec_cost_b + gas_cost_b
-    print(
-        f"Building {b}: Total electricity cost = £{elec_cost_b:.2f}, "
-        f"Total gas cost = £{gas_cost_b:.2f}, "
-        f"Total cost = £{total_cost_b:.2f}, "
-        f"Peak grid import = {peak_grid_import[b]:.3f} kW, "
-        f"Total grid import = {np.sum([pyo.value(model.p_el_vars[b, t]) for t in model.t]):.3f} kW, "
-        f"Temperature deviation from setpoint = {temp_deviation:.2f} °C"
-    )
-print(f"\nOverall peak grid import across all buildings: {np.max(peak_grid_import):.3f} kW")
-print(f"Overall total electricity cost across all buildings: £{sum(electricity_costs):.2f}")
-print(f"Overall total gas cost across all buildings: £{sum(gas_costs):.2f}")
-print(f"Overall total cost across all buildings: £{sum(total_costs):.2f}")
-print(f"Overall average temperature deviation from setpoints: {np.mean([np.mean(np.abs(np.array([pyo.value(model.T_in[b, t]) for t in model.t]) - np.array([model.T_set[b, t] for t in model.t]))) for b in model.buildings]):.2f} °C")
-print(f"Total electricity grid import across all buildings: {np.sum(grid_import_schedule):.3f} kW")
-
-save_dir = "Results/ADMM Energy Sharing"
-os.makedirs(save_dir, exist_ok=True)
-summary_df = pd.DataFrame(
-    {
-        "building": list(model.buildings),
-        "total_electricity_cost": electricity_costs,
-        "total_gas_cost": gas_costs,
-        "total_cost": total_costs,
-        "peak_grid_import_kW": peak_grid_import.tolist(),
-        "avg_temp_deviation_C": [
-            np.mean(np.abs(np.array([pyo.value(model.T_in[b, t]) for t in model.t]) - np.array([model.T_set[b, t] for t in model.t])))
-            for b in model.buildings
-        ],
-    }
-)
-summary_file = os.path.join(save_dir, "sharing_building_summary.csv")
-summary_df.to_csv(summary_file, index=False)
-print(f"Saved per-building sharing summary to {summary_file}")
-
-schedule_df = pd.DataFrame(
-    {
-        "time": list(model.t),
-        **{f"grid_import_b{b}": grid_import_schedule[b] for b in model.buildings},
-        **{f"share_import_b{b}": share_import_schedule[b] for b in model.buildings},
-        **{f"share_export_b{b}": share_export_schedule[b] for b in model.buildings},
-    }
-)
-schedule_file = os.path.join(save_dir, "sharing_import_export_schedule.csv")
-schedule_df.to_csv(schedule_file, index=False)
-print(f"Saved sharing import/export schedule to {schedule_file}")
-
-
-
-# --- Plot shared energy import/export for each building ---
-share_fig = make_subplots(
-    rows=n_buildings,
-    cols=1,
-    shared_xaxes=True,
-    subplot_titles=[f"Building {b} Shared Import/Export" for b in model.buildings],
-)
-for b in model.buildings:
-    share_fig.add_trace(
-        go.Scatter(
-            y=share_import_schedule[b],
-            mode="lines",
-            name=f"Share Import {b}",
-            line=dict(color="green"),
-            showlegend=(b == 0),
-        ),
-        row=b + 1,
-        col=1,
-    )
-    share_fig.add_trace(
-        go.Scatter(
-            y=share_export_schedule[b],
-            mode="lines",
-            name=f"Share Export {b}",
-            line=dict(color="red", dash="dash"),
-            showlegend=(b == 0),
-        ),
-        row=b + 1,
-        col=1,
-    )
-    share_fig.update_xaxes(title_text="Time", row=b + 1, col=1)
-    share_fig.update_yaxes(title_text="Power (kW)", row=b + 1, col=1)
-
-share_fig.update_layout(
-    height=300 * n_buildings,
-    title_text="Shared Energy Import and Export per Building",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-)
-try:
-    share_fig.write_image("Results/energy_sharing_import_export.png")
-    print("\nSaved shared import/export plot to Results/energy_sharing_import_export.png")
-except Exception:
-    print("\nCould not save shared import/export plot image; displaying interactively instead.")
-share_fig.show()
-
-# --- Print per-building totals and peak imported grid load ---
-peak_grid_import = np.max(grid_import_schedule, axis=1)
-
-# Save per-building results for comparison
-save_dir = "Results/ADMM/Energy_Sharing"
-os.makedirs(save_dir, exist_ok=True)
-summary_df = pd.DataFrame(
-    {
-        "building": list(model.buildings),
-        "total_electricity_cost": electricity_costs,
-        "total_gas_cost": gas_costs,
-        "total_cost": total_costs,
-        "peak_grid_import_kW": np.max(grid_import_schedule, axis=1).tolist(),
-        "avg_temp_deviation_C": [
-            np.mean(np.abs(np.array(T_in[b]) - np.array(T_set[b]))) for b in model.buildings
-        ],
-    }
-)
-summary_file = os.path.join(save_dir, "energy_sharing_building_summary.csv")
-summary_df.to_csv(summary_file, index=False)
-print(f"Saved per-building energy sharing summary to {summary_file}")
-
-schedule_df = pd.DataFrame(
-    {
-        "time": list(model.t),
-        **{f"grid_import_b{b}": grid_import_schedule[b] for b in model.buildings},
-        **{f"battery_charge_b{b}": charge_schedule[b] for b in model.buildings},
-        **{f"battery_discharge_b{b}": discharge_schedule[b] for b in model.buildings},
-        **{f"soc_b{b}": soc_schedule[b] for b in model.buildings},
-        **{f"heatpump_b{b}": heatpump_schedule[b] for b in model.buildings},
-        **{f"boiler_heat_b{b}": q_boiler_schedule[b] for b in model.buildings},
-    }
-)
-schedule_file = os.path.join(save_dir, "energy_sharing_building_schedule.csv")
-schedule_df.to_csv(schedule_file, index=False)
-print(f"Saved energy sharing schedule to {schedule_file}")
