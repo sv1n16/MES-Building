@@ -92,6 +92,7 @@ else:
     PV_B = np.tile(_pv1, (n_buildings, 1))
 IS_HIGH = (data_hr["tariff_label"] == "High").to_numpy()
 IS_LOW = (data_hr["tariff_label"] == "Low").to_numpy()
+IS_MEDIUM = ~(IS_HIGH | IS_LOW)
 
 CAP = batt.set_index("LCLid")["capacity_kwh"].reindex(BUILDING_IDS).to_numpy(float)
 MAXPOW = batt.set_index("LCLid")["max_power_kw"].reindex(BUILDING_IDS).to_numpy(float)

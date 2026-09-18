@@ -47,6 +47,7 @@ ADAPT_RHO = False  # residual-balancing (Boyd §3.4.1)
 
 PRICE_HIGH_COLOR = "#d98a29"
 PRICE_LOW_COLOR = "#5b8fc9"
+PRICE_MEDIUM_COLOR = "#8b78b5"
 ADMM_COLOR = "#2e8b6e"
 
 N, T, DT = C.n_buildings, C.time_horizon, C.dt
@@ -259,6 +260,8 @@ def _shade(ax):
             ax.axvspan(t, t + 1, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
         elif C.IS_LOW[t]:
             ax.axvspan(t, t + 1, color=PRICE_LOW_COLOR, alpha=0.13, lw=0)
+        elif C.IS_MEDIUM[t]:
+            ax.axvspan(t, t + 1, color=PRICE_MEDIUM_COLOR, alpha=0.10, lw=0)
 
 
 def plot_admm(pex, price, hist, subs, S, day):

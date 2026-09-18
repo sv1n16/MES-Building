@@ -7,7 +7,7 @@ import pandas as pd
 
 DATA_FOLDER = Path(__file__).parent / "Small LCL Data"
 TARIFF_FILE = DATA_FOLDER / "Tariffs.xlsx"
-TARIFF_PRICE_MAP = {"High": 67.20, "Low": 3.99, "Normal": 11.76}
+TARIFF_PRICE_MAP = {"Low": 3.99, "Medium": 11.76, "High": 67.20, "Normal": 11.76}
 
 
 def load_tariff_schedule(tariff_file: Path = TARIFF_FILE) -> pd.DataFrame:
@@ -19,6 +19,7 @@ def load_tariff_schedule(tariff_file: Path = TARIFF_FILE) -> pd.DataFrame:
     tariff_df = tariff_df.rename(columns={"TariffDateTime": "DateTime", "Tariff": "TariffLabel"})
     tariff_df["DateTime"] = pd.to_datetime(tariff_df["DateTime"]).dt.floor("30min")
     tariff_df["TariffLabel"] = tariff_df["TariffLabel"].astype(str).str.strip().str.title()
+    tariff_df["TariffLabel"] = tariff_df["TariffLabel"].replace("Normal", "Medium")
     return tariff_df[["DateTime", "TariffLabel"]]
 
 
@@ -30,9 +31,9 @@ def assign_tariff_prices(data: pd.DataFrame, tariff_schedule: pd.DataFrame | Non
     tariff_data["DateTime"] = pd.to_datetime(tariff_data["DateTime"]).dt.floor("30min")
 
     tariff_lookup = tariff_schedule.set_index("DateTime")["TariffLabel"].to_dict()
-    tariff_data["TariffLabel"] = tariff_data["DateTime"].map(tariff_lookup).fillna("Normal")
+    tariff_data["TariffLabel"] = tariff_data["DateTime"].map(tariff_lookup).fillna("Medium")
     tariff_data["TariffPrice_p_per_kWh"] = (
-        tariff_data["TariffLabel"].map(TARIFF_PRICE_MAP).fillna(TARIFF_PRICE_MAP["Normal"])
+        tariff_data["TariffLabel"].map(TARIFF_PRICE_MAP).fillna(TARIFF_PRICE_MAP["Medium"])
     )
     return tariff_data
 

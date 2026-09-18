@@ -95,9 +95,10 @@ BATTERY_COLOR = "#7b4bc9"
 GRID_COLOR = "#8a8f98"
 PRICE_HIGH_COLOR = "#d98a29"
 PRICE_LOW_COLOR = "#5b8fc9"
+PRICE_MEDIUM_COLOR = "#8b78b5"
 _ASSET_COLOR = {"battery+pv": "#2e8b6e", "battery": "#7b4bc9", "pv": "#e0a800", "none": "#8a8f98"}
-EXCH_COLOR = "#3b6bb0"   # exchange-ADMM (common-pool price)
-BIL_COLOR = "#c0392b"    # bilateral consensus-ADMM (pairwise P2P)
+EXCH_COLOR = "#3b6bb0"  # exchange-ADMM (common-pool price)
+BIL_COLOR = "#c0392b"  # bilateral consensus-ADMM (pairwise P2P)
 
 
 # ============================================================================
@@ -109,6 +110,8 @@ def _shade_tariff(ax):
             ax.axvspan(t, t + 1, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
         elif IS_LOW[t]:
             ax.axvspan(t, t + 1, color=PRICE_LOW_COLOR, alpha=0.13, lw=0)
+        else:
+            ax.axvspan(t, t + 1, color=PRICE_MEDIUM_COLOR, alpha=0.10, lw=0)
 
 
 def _style(ax):
@@ -162,6 +165,8 @@ def plot_showcase(no_batt: dict, own: dict, shared: dict, day: str) -> None:
     ax1.plot([], [], color=INK, lw=1.9, label="Community total (base load, excl. heating)")
     ax1.fill_between([], [], color=PRICE_HIGH_COLOR, alpha=0.2, label="High tariff (67 p/kWh)")
     ax1.fill_between([], [], color=PRICE_LOW_COLOR, alpha=0.2, label="Low tariff (4 p/kWh)")
+    ax1.fill_between([], [], color=PRICE_MEDIUM_COLOR, alpha=0.2, label="Medium tariff (12 p/kWh)")
+    ax1.fill_between([], [], color=PRICE_MEDIUM_COLOR, alpha=0.2, label="Medium tariff (12 p/kWh)")
     ax1.set_ylabel("Electrical demand (kW)", color=INK, fontsize=10)
     ax1.set_title(
         f"{pd.Timestamp(day):%A %d %b %Y} — {n_buildings} diverse buildings, central optimisation",
@@ -199,9 +204,15 @@ def plot_showcase(no_batt: dict, own: dict, shared: dict, day: str) -> None:
     batt_benefit = no_batt["op_cost"] - own["op_cost"]
     share_benefit = own["op_cost"] - shared["op_cost"]
     _fm = shared.get("fee_mode")
-    fee_note = (f"{shared['energy_lost_kWh']:.1f} kWh lost" if _fm == "loss"
-                else f"£{shared['trade_fee']:.2f} forfeited" if _fm == "forfeit"
-                else f"£{shared['market_transfer']:.2f} buyer→seller")
+    fee_note = (
+        f"{shared['energy_lost_kWh']:.1f} kWh lost"
+        if _fm == "loss"
+        else (
+            f"£{shared['trade_fee']:.2f} forfeited"
+            if _fm == "forfeit"
+            else f"£{shared['market_transfer']:.2f} buyer→seller"
+        )
+    )
     ax2.annotate(
         f"sharing saves £{share_benefit:.2f}/day\n" f"({shared['shared_energy_kWh']:.1f} kWh traded, {fee_note})",
         xy=(time_horizon - 0.3, cc["shr"][-1]),
@@ -353,6 +364,57 @@ def plot_building_schedules(res: dict, day: str, scenario: str = "shared") -> No
     fig.tight_layout()
     out = PLOTS_DIR / f"07_building_schedules_{scenario}.png"
     fig.savefig(out, dpi=130)
+    plt.close(fig)
+    print(f"saved {out}")
+
+
+def plot_energy_sources_per_building(res: dict, day: str, scenario: str = "shared") -> None:
+    """Show the electricity supply mix for every building over the day.
+
+    The stacked sources are PV, battery discharge, P2P imports, and grid
+    imports. The black line is the building's electrical demand including its
+    heat pump, so the figure makes the source of each building's electricity
+    visible while retaining the optimisation's actual schedules.
+    """
+    edges = np.arange(time_horizon + 1)
+
+    def step(y):
+        return edges, np.concatenate([np.asarray(y, float), np.asarray(y, float)[-1:]])
+
+    source_names = ("PV", "Battery discharge", "P2P import", "Grid import")
+    source_colors = ("#e0a800", "#7b4bc9", "#2e8b6e", GRID_COLOR)
+    fig, axes = plt.subplots(n_buildings, 1, figsize=(13, 1.9 * n_buildings), sharex=True, squeeze=False)
+
+    for b, lclid in enumerate(BUILDING_IDS):
+        ax = axes[b, 0]
+        _shade_tariff(ax)
+        sources = np.vstack((PV_B[b], res["discharge"][b], res["recv"][b], res["grid"][b]))
+        ax.stackplot(edges[:-1], sources, labels=source_names, colors=source_colors, alpha=0.82, step="post")
+        demand = LOAD[b] + res["p_hp"][b]
+        ax.step(*step(demand), where="post", color=INK, lw=1.4, label="Demand + heat pump")
+        ax.set_ylabel(f"{lclid}\n{ASSETS[b]}\nkW", fontsize=8)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, axis="y", color="#ededed", lw=0.7)
+        ax.set_axisbelow(True)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(colors=MUTED, labelsize=7)
+        if b == 0:
+            ax.set_title(
+                f"{pd.Timestamp(day):%d %b %Y} - where each building's electricity comes from ({scenario})",
+                loc="left",
+                fontsize=11,
+                fontweight="bold",
+                pad=8,
+            )
+            ax.legend(frameon=False, fontsize=7.5, loc="upper left", ncol=5)
+
+    axes[-1, 0].set_xlabel("Hour of day", fontsize=9)
+    axes[-1, 0].set_xlim(0, time_horizon)
+    axes[-1, 0].set_xticks(range(0, time_horizon + 1, 3))
+    fig.tight_layout()
+    out = PLOTS_DIR / f"23_energy_sources_per_building_{scenario}.png"
+    fig.savefig(out, dpi=140)
     plt.close(fig)
     print(f"saved {out}")
 
@@ -717,9 +779,9 @@ def _building_benefit_table(own: dict, shared: dict, bil: dict | None = None) ->
     consensus-ADMM as `bil_*` columns — both settled at SHARE_TRADE_FEE_FRAC ×
     tariff, so the two sets of numbers are directly comparable.
     """
-    d_elec = own["elec_b"] - shared["elec_b"]          # grid-cost saving (+ = saved)
+    d_elec = own["elec_b"] - shared["elec_b"]  # grid-cost saving (+ = saved)
     d_gas = own["gas_b"] - shared["gas_b"]
-    trade = -shared["trade_cost_b"]                    # + = building is paid / forfeits nothing
+    trade = -shared["trade_cost_b"]  # + = building is paid / forfeits nothing
     cols = {
         "LCLid": BUILDING_IDS,
         "assets": ASSETS,
@@ -734,7 +796,7 @@ def _building_benefit_table(own: dict, shared: dict, bil: dict | None = None) ->
         bflow = bil["flow"]
         b_elec = own["elec_b"] - bil["elec_b"]
         b_gas = own["gas_b"] - bil["gas_b"]
-        b_trade = -bil["settle_b"]                     # settle_b: + pays / − receives
+        b_trade = -bil["settle_b"]  # settle_b: + pays / − receives
         cols.update(
             {
                 "bil_grid_saving": b_elec,
@@ -761,11 +823,27 @@ def plot_building_benefit(own: dict, shared: dict, day: str, bil: dict | None = 
             v = df[f"{prefix}_{col}" if prefix else col].to_numpy()
             pos = np.where(v >= 0, v, 0.0)
             neg = np.where(v < 0, v, 0.0)
-            ax.bar(xpos, pos, bottom=bpos, color=color, width=width, hatch=hatch,
-                   edgecolor="white" if hatch else "none", linewidth=0,
-                   label=lab if label_segs else None)
-            ax.bar(xpos, neg, bottom=bneg, color=color, width=width, hatch=hatch,
-                   edgecolor="white" if hatch else "none", linewidth=0)
+            ax.bar(
+                xpos,
+                pos,
+                bottom=bpos,
+                color=color,
+                width=width,
+                hatch=hatch,
+                edgecolor="white" if hatch else "none",
+                linewidth=0,
+                label=lab if label_segs else None,
+            )
+            ax.bar(
+                xpos,
+                neg,
+                bottom=bneg,
+                color=color,
+                width=width,
+                hatch=hatch,
+                edgecolor="white" if hatch else "none",
+                linewidth=0,
+            )
             bpos += pos
             bneg += neg
         return bpos, bneg
@@ -775,8 +853,15 @@ def plot_building_benefit(own: dict, shared: dict, day: str, bil: dict | None = 
         p_c, n_c = stacked_bar("", x - w / 2, w, None, True)
         p_b, n_b = stacked_bar("bil", x + w / 2, w, "///", False)
         ax.plot(x - w / 2, df["net_benefit"], "D", color=INK, ms=5.5, label="net benefit — central")
-        ax.plot(x + w / 2, df["bil_net_benefit"], "D", color="#e0a800", ms=5.5,
-                markeredgecolor="#8a6d00", label="net benefit — bilateral ADMM")
+        ax.plot(
+            x + w / 2,
+            df["bil_net_benefit"],
+            "D",
+            color="#e0a800",
+            ms=5.5,
+            markeredgecolor="#8a6d00",
+            label="net benefit — bilateral ADMM",
+        )
         top = np.maximum(p_c, p_b)
         bot = np.minimum(n_c, n_b)
     else:
@@ -793,18 +878,29 @@ def plot_building_benefit(own: dict, shared: dict, day: str, bil: dict | None = 
         role = "seller" if s > r + 0.1 else ("buyer" if r > s + 0.1 else "·")
         nc = df["net_benefit"].iloc[i]
         xc = x[i] - w / 2
-        ax.annotate(f"{role}\n£{nc:.2f}", (xc, p_c[i] if nc >= 0 else n_c[i]),
-                    textcoords="offset points", xytext=(0, 6 if nc >= 0 else -16),
-                    ha="center", fontsize=6.8, color=INK)
+        ax.annotate(
+            f"{role}\n£{nc:.2f}",
+            (xc, p_c[i] if nc >= 0 else n_c[i]),
+            textcoords="offset points",
+            xytext=(0, 6 if nc >= 0 else -16),
+            ha="center",
+            fontsize=6.8,
+            color=INK,
+        )
         if has_bil:
             nb = df["bil_net_benefit"].iloc[i]
-            ax.annotate(f"£{nb:.2f}", (x[i] + w / 2, p_b[i] if nb >= 0 else n_b[i]),
-                        textcoords="offset points", xytext=(0, 6 if nb >= 0 else -14),
-                        ha="center", fontsize=6.8, color="#8a6d00")
+            ax.annotate(
+                f"£{nb:.2f}",
+                (x[i] + w / 2, p_b[i] if nb >= 0 else n_b[i]),
+                textcoords="offset points",
+                xytext=(0, 6 if nb >= 0 else -14),
+                ha="center",
+                fontsize=6.8,
+                color="#8a6d00",
+            )
 
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{i}\n{a}" for i, a in zip(df["LCLid"], df["assets"])],
-                       rotation=45, ha="right", fontsize=7.5)
+    ax.set_xticklabels([f"{i}\n{a}" for i, a in zip(df["LCLid"], df["assets"])], rotation=45, ha="right", fontsize=7.5)
     ax.set_ylabel("£ / day  (+ = better off from sharing)", color=INK, fontsize=10)
     _comm = f"community £{df['net_benefit'].sum():.2f}/day"
     if has_bil:
@@ -813,7 +909,11 @@ def plot_building_benefit(own: dict, shared: dict, day: str, bil: dict | None = 
         f"{pd.Timestamp(day):%A %d %b %Y} — per-building benefit from P2P sharing "
         f"(vs own battery; FEE_MODE='{shared.get('fee_mode')}', frac {SHARE_TRADE_FEE_FRAC:g}; {_comm})"
         + ("   ·   hatched = bilateral ADMM" if has_bil else ""),
-        color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=10,
+        color=INK,
+        fontsize=10.5,
+        fontweight="bold",
+        loc="left",
+        pad=10,
     )
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
@@ -845,29 +945,49 @@ def _plotly_building_benefit(df: pd.DataFrame, shared: dict, day: str) -> None:
     )
     fig = go.Figure()
     for col, color, lab in segs:
-        fig.add_bar(x=lbl, y=df[col], name=lab, marker_color=color,
-                    offsetgroup="central", legendgroup=lab)
-    fig.add_trace(go.Scatter(x=lbl, y=df["net_benefit"], mode="markers",
-                             name="net benefit — central" if has_bil else "net benefit",
-                             marker=dict(color="#1a1a1a", size=9, symbol="diamond")))
+        fig.add_bar(x=lbl, y=df[col], name=lab, marker_color=color, offsetgroup="central", legendgroup=lab)
+    fig.add_trace(
+        go.Scatter(
+            x=lbl,
+            y=df["net_benefit"],
+            mode="markers",
+            name="net benefit — central" if has_bil else "net benefit",
+            marker=dict(color="#1a1a1a", size=9, symbol="diamond"),
+        )
+    )
     if has_bil:
         for col, color, lab in segs:
-            fig.add_bar(x=lbl, y=df[f"bil_{col}"], name=lab, legendgroup=lab, showlegend=False,
-                        offsetgroup="bilateral",
-                        marker=dict(color=color, pattern=dict(shape="/", fgcolor="white")))
-        fig.add_trace(go.Scatter(x=lbl, y=df["bil_net_benefit"], mode="markers",
-                                 name="net benefit — bilateral ADMM",
-                                 marker=dict(color="#e0a800", size=9, symbol="diamond",
-                                             line=dict(color="#8a6d00", width=1.5))))
+            fig.add_bar(
+                x=lbl,
+                y=df[f"bil_{col}"],
+                name=lab,
+                legendgroup=lab,
+                showlegend=False,
+                offsetgroup="bilateral",
+                marker=dict(color=color, pattern=dict(shape="/", fgcolor="white")),
+            )
+        fig.add_trace(
+            go.Scatter(
+                x=lbl,
+                y=df["bil_net_benefit"],
+                mode="markers",
+                name="net benefit — bilateral ADMM",
+                marker=dict(color="#e0a800", size=9, symbol="diamond", line=dict(color="#8a6d00", width=1.5)),
+            )
+        )
     _comm = f"community £{df['net_benefit'].sum():.2f}/day"
     if has_bil:
         _comm += f"; bilateral ADMM £{df['bil_net_benefit'].sum():.2f}/day"
     fig.update_layout(
-        barmode="relative", template="plotly_white", height=480, hovermode="x unified",
+        barmode="relative",
+        template="plotly_white",
+        height=480,
+        hovermode="x unified",
         title=f"{pd.Timestamp(day):%A %d %b %Y} — per-building benefit from P2P sharing "
-              f"(vs own battery; FEE_MODE='{shared.get('fee_mode')}'; {_comm})"
-              + ("   ·   striped bars = bilateral ADMM" if has_bil else ""),
-        yaxis_title="£ / day (+ = better off)", legend=dict(orientation="h", y=-0.25),
+        f"(vs own battery; FEE_MODE='{shared.get('fee_mode')}'; {_comm})"
+        + ("   ·   striped bars = bilateral ADMM" if has_bil else ""),
+        yaxis_title="£ / day (+ = better off)",
+        legend=dict(orientation="h", y=-0.25),
     )
     out = PLOTS_DIR / "11_building_benefit.html"
     fig.write_html(out, include_plotlyjs=True)
@@ -910,30 +1030,52 @@ def plot_sharing_savings(
     if bil_cost_b is not None:
         df["bil_cost"] = np.asarray(bil_cost_b, float)
         df["bil_saving"] = df["own_cost"] - df["bil_cost"]
-    df["role"] = np.where(df["sent_kWh"] > df["recv_kWh"] + 0.1, "net seller",
-                          np.where(df["recv_kWh"] > df["sent_kWh"] + 0.1, "net buyer", "—"))
+    df["role"] = np.where(
+        df["sent_kWh"] > df["recv_kWh"] + 0.1,
+        "net seller",
+        np.where(df["recv_kWh"] > df["sent_kWh"] + 0.1, "net buyer", "—"),
+    )
     df = df.sort_values("saving", ascending=False).reset_index(drop=True)
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(15, 5.2), gridspec_kw={"width_ratios": [2.6, 1]})
     x = np.arange(len(df))
 
     axL.bar(x - 0.2, df["own_cost"], 0.4, color="#c9ced6", label="own battery (no sharing)")
-    axL.bar(x + 0.2, df["shared_cost"], 0.4,
-            color=[_ASSET_COLOR[a] for a in df["assets"]], label="shared — central market")
+    axL.bar(
+        x + 0.2, df["shared_cost"], 0.4, color=[_ASSET_COLOR[a] for a in df["assets"]], label="shared — central market"
+    )
     if "exch_cost" in df:
-        axL.scatter(x + 0.2, df["exch_cost"], s=44, marker="o", facecolors="none",
-                    edgecolors=EXCH_COLOR, linewidths=1.6, zorder=5, label="exchange-ADMM (common pool)")
+        axL.scatter(
+            x + 0.2,
+            df["exch_cost"],
+            s=44,
+            marker="o",
+            facecolors="none",
+            edgecolors=EXCH_COLOR,
+            linewidths=1.6,
+            zorder=5,
+            label="exchange-ADMM (common pool)",
+        )
     if "bil_cost" in df:
-        axL.scatter(x + 0.2, df["bil_cost"], s=46, marker="D", color=BIL_COLOR,
-                    zorder=6, label="bilateral ADMM (pairwise P2P)")
+        axL.scatter(
+            x + 0.2, df["bil_cost"], s=46, marker="D", color=BIL_COLOR, zorder=6, label="bilateral ADMM (pairwise P2P)"
+        )
     for i, (s, r) in enumerate(zip(df["saving"], df["role"])):
         top = max(df["own_cost"].iloc[i], df["shared_cost"].iloc[i])
-        axL.annotate(f"{r}\n{'+' if s >= 0 else '−'}£{abs(s):.2f}", (i, top),
-                     textcoords="offset points", xytext=(0, 7), ha="center", fontsize=7.5, color=INK)
+        axL.annotate(
+            f"{r}\n{'+' if s >= 0 else '−'}£{abs(s):.2f}",
+            (i, top),
+            textcoords="offset points",
+            xytext=(0, 7),
+            ha="center",
+            fontsize=7.5,
+            color=INK,
+        )
     axL.set_ylim(0, df["own_cost"].max() * 1.24)
     axL.set_xticks(x)
-    axL.set_xticklabels([f"{i}\n{a}" for i, a in zip(df["LCLid"], df["assets"])],
-                        rotation=45, ha="right", fontsize=7.5)
+    axL.set_xticklabels(
+        [f"{i}\n{a}" for i, a in zip(df["LCLid"], df["assets"])], rotation=45, ha="right", fontsize=7.5
+    )
     axL.set_ylabel("operating cost (£/day)", color=INK, fontsize=10)
     notes = []
     if exch_rel_err is not None:
@@ -941,9 +1083,15 @@ def plot_sharing_savings(
     if bil_rel_err is not None:
         notes.append(f"bilateral {bil_rel_err:.1%}")
     rms_note = f"; RMS vs central: {', '.join(notes)}" if notes else ""
-    axL.set_title(f"{pd.Timestamp(day):%A %d %b %Y} — per-building operating cost: sharing vs no sharing "
-                  f"(FEE_MODE='{shared.get('fee_mode')}', frac {SHARE_TRADE_FEE_FRAC:g}{rms_note})",
-                  color=INK, fontsize=11, fontweight="bold", loc="left", pad=22)
+    axL.set_title(
+        f"{pd.Timestamp(day):%A %d %b %Y} — per-building operating cost: sharing vs no sharing "
+        f"(FEE_MODE='{shared.get('fee_mode')}', frac {SHARE_TRADE_FEE_FRAC:g}{rms_note})",
+        color=INK,
+        fontsize=11,
+        fontweight="bold",
+        loc="left",
+        pad=22,
+    )
     axL.legend(frameon=False, fontsize=8, loc="upper left", ncol=2)
 
     # right: saving aggregated by asset class, one bar per method
@@ -958,12 +1106,26 @@ def plot_sharing_savings(
     for j, c in enumerate(method_cols):
         off = (nm - 1) / 2 - j
         color = [_ASSET_COLOR[a] for a in order] if c == "saving" else meth_col[c]
-        axR.barh(y + off * bh, gg[c].to_numpy(), bh, color=color,
-                 hatch=None if c == "saving" else "///", edgecolor="white", label=meth_lab[c])
+        axR.barh(
+            y + off * bh,
+            gg[c].to_numpy(),
+            bh,
+            color=color,
+            hatch=None if c == "saving" else "///",
+            edgecolor="white",
+            label=meth_lab[c],
+        )
     for i, tot in enumerate(gg["saving"].to_numpy()):
-        axR.annotate(f"£{tot:+.2f}", (tot, y[i] + ((nm - 1) / 2) * bh),
-                     textcoords="offset points", xytext=(6 if tot >= 0 else -6, 0),
-                     ha="left" if tot >= 0 else "right", va="center", fontsize=7.5, color=INK)
+        axR.annotate(
+            f"£{tot:+.2f}",
+            (tot, y[i] + ((nm - 1) / 2) * bh),
+            textcoords="offset points",
+            xytext=(6 if tot >= 0 else -6, 0),
+            ha="left" if tot >= 0 else "right",
+            va="center",
+            fontsize=7.5,
+            color=INK,
+        )
     axR.set_yticks(y)
     axR.set_yticklabels(order, fontsize=9)
     axR.axvline(0, color=MUTED, lw=0.8)
@@ -971,8 +1133,14 @@ def plot_sharing_savings(
     _lo, _hi = min(0.0, float(allv.min())), max(0.01, float(allv.max()))
     axR.set_xlim(_lo - 0.1 * _hi, _hi * 2.15)
     axR.set_xlabel("total saving from sharing (£/day)", fontsize=9)
-    axR.set_title(f"By asset class  (community £{df['saving'].sum():+.2f}/day)",
-                  color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=10)
+    axR.set_title(
+        f"By asset class  (community £{df['saving'].sum():+.2f}/day)",
+        color=INK,
+        fontsize=10.5,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     if nm > 1:
         axR.legend(frameon=False, fontsize=7.5, loc="lower right")
 
@@ -998,32 +1166,70 @@ def _plotly_sharing_savings(df: pd.DataFrame, gg: pd.DataFrame, order: list, sha
     except ImportError:
         return
     lbl = [df["LCLid"], df["assets"]]
-    fig = make_subplots(rows=1, cols=2, column_widths=[0.68, 0.32], horizontal_spacing=0.09,
-                        subplot_titles=("Operating cost per building: no sharing vs sharing",
-                                        "Saving by asset class (£/day)"))
-    fig.add_bar(x=lbl, y=df["own_cost"], name="own battery (no sharing)", marker_color="#c9ced6",
-                row=1, col=1)
-    fig.add_bar(x=lbl, y=df["shared_cost"], name="shared — central market",
-                marker_color=[_ASSET_COLOR[a] for a in df["assets"]], row=1, col=1)
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        column_widths=[0.68, 0.32],
+        horizontal_spacing=0.09,
+        subplot_titles=("Operating cost per building: no sharing vs sharing", "Saving by asset class (£/day)"),
+    )
+    fig.add_bar(x=lbl, y=df["own_cost"], name="own battery (no sharing)", marker_color="#c9ced6", row=1, col=1)
+    fig.add_bar(
+        x=lbl,
+        y=df["shared_cost"],
+        name="shared — central market",
+        marker_color=[_ASSET_COLOR[a] for a in df["assets"]],
+        row=1,
+        col=1,
+    )
     if "exch_cost" in df:
-        fig.add_trace(go.Scatter(x=lbl, y=df["exch_cost"], mode="markers", name="exchange-ADMM (common pool)",
-                                 marker=dict(color=EXCH_COLOR, size=10, symbol="circle-open",
-                                             line=dict(width=2))), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=lbl,
+                y=df["exch_cost"],
+                mode="markers",
+                name="exchange-ADMM (common pool)",
+                marker=dict(color=EXCH_COLOR, size=10, symbol="circle-open", line=dict(width=2)),
+            ),
+            row=1,
+            col=1,
+        )
     if "bil_cost" in df:
-        fig.add_trace(go.Scatter(x=lbl, y=df["bil_cost"], mode="markers", name="bilateral ADMM (pairwise P2P)",
-                                 marker=dict(color=BIL_COLOR, size=9, symbol="diamond")), row=1, col=1)
-    for c, lab, col in (("saving", "central market", None),
-                        ("exch_saving", "exchange-ADMM", EXCH_COLOR),
-                        ("bil_saving", "bilateral ADMM", BIL_COLOR)):
+        fig.add_trace(
+            go.Scatter(
+                x=lbl,
+                y=df["bil_cost"],
+                mode="markers",
+                name="bilateral ADMM (pairwise P2P)",
+                marker=dict(color=BIL_COLOR, size=9, symbol="diamond"),
+            ),
+            row=1,
+            col=1,
+        )
+    for c, lab, col in (
+        ("saving", "central market", None),
+        ("exch_saving", "exchange-ADMM", EXCH_COLOR),
+        ("bil_saving", "bilateral ADMM", BIL_COLOR),
+    ):
         if c not in gg:
             continue
-        fig.add_bar(x=order, y=gg[c].to_numpy(), name=lab, showlegend=(c != "saving"),
-                    marker_color=([_ASSET_COLOR[a] for a in order] if col is None else col),
-                    row=1, col=2)
-    fig.update_layout(template="plotly_white", height=470, barmode="group",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — per-building saving from P2P sharing "
-                            f"(FEE_MODE='{shared.get('fee_mode')}'; community £{df['saving'].sum():+.2f}/day)",
-                      legend=dict(orientation="h", y=-0.2))
+        fig.add_bar(
+            x=order,
+            y=gg[c].to_numpy(),
+            name=lab,
+            showlegend=(c != "saving"),
+            marker_color=([_ASSET_COLOR[a] for a in order] if col is None else col),
+            row=1,
+            col=2,
+        )
+    fig.update_layout(
+        template="plotly_white",
+        height=470,
+        barmode="group",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — per-building saving from P2P sharing "
+        f"(FEE_MODE='{shared.get('fee_mode')}'; community £{df['saving'].sum():+.2f}/day)",
+        legend=dict(orientation="h", y=-0.2),
+    )
     fig.update_yaxes(title_text="£/day", row=1, col=1)
     out = PLOTS_DIR / "13_sharing_savings.html"
     fig.write_html(out, include_plotlyjs=True)
@@ -1062,10 +1268,10 @@ def _dev_stats(tin: np.ndarray):
     alpha * Σ (T_in − T_set)²  (same quantity solve_and_extract calls 'comfort')."""
     d = np.asarray(tin, float) - T_SET[None, :]
     return (
-        np.sqrt((d ** 2).mean(axis=1)),
+        np.sqrt((d**2).mean(axis=1)),
         d.mean(axis=1),
-        float(np.sqrt((d ** 2).mean())),
-        float(alpha * (d ** 2).sum()),
+        float(np.sqrt((d**2).mean())),
+        float(alpha * (d**2).sum()),
     )
 
 
@@ -1088,12 +1294,22 @@ def _comfort_peak_csv(series: dict, out_stem: str) -> None:
         peak_b, comm_peak, peak_hr, comm_kwh = _peak_stats(d["grid"])
         hr_b = _peak_hour_b(d["grid"])
         for i, bid in enumerate(BUILDING_IDS):
-            rows.append({"series": lab, "LCLid": bid, "assets": ASSETS[i],
-                         "rms_dev_C": rms_b[i], "mean_signed_dev_C": mean_b[i],
-                         "peak_grid_import_kW": peak_b[i], "peak_grid_hour": int(hr_b[i]),
-                         "community_rms_C": comm_rms, "comfort_penalty": pen,
-                         "community_peak_kW": comm_peak, "community_peak_hour": peak_hr,
-                         "community_import_kWh": comm_kwh})
+            rows.append(
+                {
+                    "series": lab,
+                    "LCLid": bid,
+                    "assets": ASSETS[i],
+                    "rms_dev_C": rms_b[i],
+                    "mean_signed_dev_C": mean_b[i],
+                    "peak_grid_import_kW": peak_b[i],
+                    "peak_grid_hour": int(hr_b[i]),
+                    "community_rms_C": comm_rms,
+                    "comfort_penalty": pen,
+                    "community_peak_kW": comm_peak,
+                    "community_peak_hour": peak_hr,
+                    "community_import_kWh": comm_kwh,
+                }
+            )
     pd.DataFrame(rows).to_csv(PLOTS_DIR / f"{out_stem}.csv", index=False)
 
 
@@ -1116,13 +1332,18 @@ def _plot_comfort_peak_bars(series: dict, day: str, out_stem: str, title: str) -
         off = (j - (n - 1) / 2) * bw
         col = _DEV_COLOR.get(lab, "#777")
         axT.bar(x + off, rms_b, bw, color=col, label=f"{lab}  (RMS {comm_rms:.2f}°C)")
-        axT.scatter(x + off, mean_b, s=15, marker="D", zorder=5, linewidths=0.4,
-                    edgecolors="white",
-                    c=["#3b6bb0" if v < 0 else "#c0392b" for v in mean_b])
-        axP.bar(x + off, peak_b, bw, color=col,
-                label=f"{lab}  (community peak {comm_peak:.1f} kW @ {peak_hr:02d}h)")
-        axH.scatter(x + off, hr_mat[j], s=44, color=col, edgecolors="white", linewidths=0.5,
-                    zorder=5, label=lab)
+        axT.scatter(
+            x + off,
+            mean_b,
+            s=15,
+            marker="D",
+            zorder=5,
+            linewidths=0.4,
+            edgecolors="white",
+            c=["#3b6bb0" if v < 0 else "#c0392b" for v in mean_b],
+        )
+        axP.bar(x + off, peak_b, bw, color=col, label=f"{lab}  (community peak {comm_peak:.1f} kW @ {peak_hr:02d}h)")
+        axH.scatter(x + off, hr_mat[j], s=44, color=col, edgecolors="white", linewidths=0.5, zorder=5, label=lab)
 
     # connect each building's peak hour across the series so a shift is visible
     if n > 1:
@@ -1131,8 +1352,9 @@ def _plot_comfort_peak_bars(series: dict, day: str, out_stem: str, title: str) -
             axH.plot(b + offs, hr_mat[:, b], color=MUTED, lw=0.6, zorder=1)
 
     axT.axhline(0, color=MUTED, lw=0.8)
-    axT.set_ylabel("RMS deviation from setpoint (°C)   ·   ◆ mean signed dev "
-                   "(blue = under-heated)", color=INK, fontsize=9)
+    axT.set_ylabel(
+        "RMS deviation from setpoint (°C)   ·   ◆ mean signed dev " "(blue = under-heated)", color=INK, fontsize=9
+    )
     axT.set_title("Thermal comfort", color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=8)
     axP.set_ylabel("peak grid import over the day (kW)", color=INK, fontsize=9.5)
     axP.set_title("Peak grid import", color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=8)
@@ -1140,14 +1362,14 @@ def _plot_comfort_peak_bars(series: dict, day: str, out_stem: str, title: str) -
     axH.axhspan(17, 22, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
     axH.set_ylim(-0.6, time_horizon)
     axH.set_yticks(range(0, time_horizon + 1, 3))
-    axH.set_ylabel("hour of the building's peak grid import\n(shaded band = 17–22h high tariff)",
-                   color=INK, fontsize=9)
+    axH.set_ylabel(
+        "hour of the building's peak grid import\n(shaded band = 17–22h high tariff)", color=INK, fontsize=9
+    )
     axH.set_title("Peak-import time", color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=8)
 
     for ax in (axT, axP, axH):
         ax.set_xticks(x)
-        ax.set_xticklabels([f"{i}\n{a}" for i, a in zip(BUILDING_IDS, ASSETS)],
-                           rotation=45, ha="right", fontsize=7.5)
+        ax.set_xticklabels([f"{i}\n{a}" for i, a in zip(BUILDING_IDS, ASSETS)], rotation=45, ha="right", fontsize=7.5)
         for sp in ("top", "right"):
             ax.spines[sp].set_visible(False)
         ax.tick_params(colors=MUTED, labelsize=8)
@@ -1157,8 +1379,9 @@ def _plot_comfort_peak_bars(series: dict, day: str, out_stem: str, title: str) -
     axP.legend(frameon=False, fontsize=7.5, ncol=1, loc="upper right")
     axH.legend(frameon=False, fontsize=7.5, ncol=1, loc="upper right")
 
-    fig.suptitle(f"{pd.Timestamp(day):%A %d %b %Y} — {title}",
-                 color=INK, fontsize=11.5, fontweight="bold", x=0.02, ha="left")
+    fig.suptitle(
+        f"{pd.Timestamp(day):%A %d %b %Y} — {title}", color=INK, fontsize=11.5, fontweight="bold", x=0.02, ha="left"
+    )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     out = PLOTS_DIR / f"{out_stem}.png"
     fig.savefig(out, dpi=150)
@@ -1184,16 +1407,30 @@ def plot_comfort_peak_total(series: dict, day: str) -> None:
     fig, (axT, axP) = plt.subplots(1, 2, figsize=(4.0 + 1.5 * len(labels), 4.7))
     axT.bar(x, rms, 0.6, color=cols)
     for i, (v, p) in enumerate(zip(rms, pens)):
-        axT.annotate(f"{v:.2f}°C\npenalty {p:.0f}", (i, v), textcoords="offset points",
-                     xytext=(0, 4), ha="center", fontsize=8, color=INK)
+        axT.annotate(
+            f"{v:.2f}°C\npenalty {p:.0f}",
+            (i, v),
+            textcoords="offset points",
+            xytext=(0, 4),
+            ha="center",
+            fontsize=8,
+            color=INK,
+        )
     axT.set_ylabel("community RMS deviation from setpoint (°C)", color=INK, fontsize=9.5)
     axT.set_ylim(0, max(rms) * 1.30)
     axT.set_title("Thermal comfort", color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=8)
 
     axP.bar(x, peaks, 0.6, color=cols)
     for i, (v, h) in enumerate(zip(peaks, hrs)):
-        axP.annotate(f"{v:.1f} kW\n@ {h:02d}h", (i, v), textcoords="offset points",
-                     xytext=(0, 4), ha="center", fontsize=8, color=INK)
+        axP.annotate(
+            f"{v:.1f} kW\n@ {h:02d}h",
+            (i, v),
+            textcoords="offset points",
+            xytext=(0, 4),
+            ha="center",
+            fontsize=8,
+            color=INK,
+        )
     axP.set_ylabel("community peak grid import (kW)", color=INK, fontsize=9.5)
     axP.set_ylim(0, max(peaks) * 1.22)
     axP.set_title("Peak grid import", color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=8)
@@ -1207,17 +1444,28 @@ def plot_comfort_peak_total(series: dict, day: str) -> None:
         ax.grid(True, axis="y", color="#ededed", lw=0.7)
         ax.set_axisbelow(True)
 
-    fig.suptitle(f"{pd.Timestamp(day):%A %d %b %Y} — community thermal comfort & peak grid "
-                 f"import, all approaches", color=INK, fontsize=11.5, fontweight="bold",
-                 x=0.02, ha="left")
+    fig.suptitle(
+        f"{pd.Timestamp(day):%A %d %b %Y} — community thermal comfort & peak grid " f"import, all approaches",
+        color=INK,
+        fontsize=11.5,
+        fontweight="bold",
+        x=0.02,
+        ha="left",
+    )
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     out = PLOTS_DIR / "17_comfort_peak_total.png"
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"saved {out}")
-    pd.DataFrame({"approach": labels, "community_rms_dev_C": rms, "comfort_penalty": pens,
-                  "community_peak_kW": peaks, "community_peak_hour": hrs}).to_csv(
-        PLOTS_DIR / "17_comfort_peak_total.csv", index=False)
+    pd.DataFrame(
+        {
+            "approach": labels,
+            "community_rms_dev_C": rms,
+            "comfort_penalty": pens,
+            "community_peak_kW": peaks,
+            "community_peak_hour": hrs,
+        }
+    ).to_csv(PLOTS_DIR / "17_comfort_peak_total.csv", index=False)
     _plotly_comfort_peak_total(series, day)
 
 
@@ -1228,28 +1476,56 @@ def _plotly_comfort_peak_bars(series: dict, day: str, out_stem: str, title: str)
     except ImportError:
         return
     lbl = [BUILDING_IDS, ASSETS]
-    fig = make_subplots(rows=1, cols=3, horizontal_spacing=0.055,
-                        subplot_titles=("RMS temperature deviation from setpoint (°C)",
-                                        "Peak grid import (kW)",
-                                        "Hour of the building's peak grid import"))
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        horizontal_spacing=0.055,
+        subplot_titles=(
+            "RMS temperature deviation from setpoint (°C)",
+            "Peak grid import (kW)",
+            "Hour of the building's peak grid import",
+        ),
+    )
     for lab in series:
         rms_b, _m, comm_rms, _p = _dev_stats(series[lab]["T_in"])
         peak_b, comm_peak, hr, _k = _peak_stats(series[lab]["grid"])
         hr_b = _peak_hour_b(series[lab]["grid"])
         col = _DEV_COLOR.get(lab, "#777")
-        fig.add_bar(x=lbl, y=rms_b, name=f"{lab} (RMS {comm_rms:.2f}°C)", marker_color=col,
-                    legendgroup=lab, row=1, col=1)
-        fig.add_bar(x=lbl, y=peak_b, name=f"{lab} (peak {comm_peak:.1f} kW @ {hr:02d}h)",
-                    marker_color=col, legendgroup=lab, showlegend=False, row=1, col=2)
-        fig.add_trace(go.Scatter(x=lbl, y=hr_b, mode="markers", name=lab, legendgroup=lab,
-                                 showlegend=False,
-                                 marker=dict(color=col, size=11, line=dict(color="white", width=1))),
-                      row=1, col=3)
+        fig.add_bar(
+            x=lbl, y=rms_b, name=f"{lab} (RMS {comm_rms:.2f}°C)", marker_color=col, legendgroup=lab, row=1, col=1
+        )
+        fig.add_bar(
+            x=lbl,
+            y=peak_b,
+            name=f"{lab} (peak {comm_peak:.1f} kW @ {hr:02d}h)",
+            marker_color=col,
+            legendgroup=lab,
+            showlegend=False,
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=lbl,
+                y=hr_b,
+                mode="markers",
+                name=lab,
+                legendgroup=lab,
+                showlegend=False,
+                marker=dict(color=col, size=11, line=dict(color="white", width=1)),
+            ),
+            row=1,
+            col=3,
+        )
     fig.add_hrect(y0=17, y1=22, fillcolor=PRICE_HIGH_COLOR, opacity=0.12, line_width=0, row=1, col=3)
     fig.update_yaxes(title_text="hour of day", range=[-0.6, time_horizon], dtick=3, row=1, col=3)
-    fig.update_layout(template="plotly_white", height=470, barmode="group",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — {title}",
-                      legend=dict(orientation="h", y=-0.25))
+    fig.update_layout(
+        template="plotly_white",
+        height=470,
+        barmode="group",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — {title}",
+        legend=dict(orientation="h", y=-0.25),
+    )
     out = PLOTS_DIR / f"{out_stem}.html"
     fig.write_html(out, include_plotlyjs=True)
     print(f"saved {out}")
@@ -1265,16 +1541,37 @@ def _plotly_comfort_peak_total(series: dict, day: str) -> None:
     rms = [_dev_stats(series[lab]["T_in"])[2] for lab in labels]
     peaks = [_peak_stats(series[lab]["grid"])[1] for lab in labels]
     cols = [_DEV_COLOR.get(lab, "#777") for lab in labels]
-    fig = make_subplots(rows=1, cols=2, horizontal_spacing=0.12,
-                        subplot_titles=("Community RMS temperature deviation (°C)",
-                                        "Community peak grid import (kW)"))
-    fig.add_bar(x=labels, y=rms, marker_color=cols, text=[f"{v:.2f}" for v in rms],
-                textposition="outside", showlegend=False, row=1, col=1)
-    fig.add_bar(x=labels, y=peaks, marker_color=cols, text=[f"{v:.1f}" for v in peaks],
-                textposition="outside", showlegend=False, row=1, col=2)
-    fig.update_layout(template="plotly_white", height=440,
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — community comfort & peak import, "
-                            f"all approaches")
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        horizontal_spacing=0.12,
+        subplot_titles=("Community RMS temperature deviation (°C)", "Community peak grid import (kW)"),
+    )
+    fig.add_bar(
+        x=labels,
+        y=rms,
+        marker_color=cols,
+        text=[f"{v:.2f}" for v in rms],
+        textposition="outside",
+        showlegend=False,
+        row=1,
+        col=1,
+    )
+    fig.add_bar(
+        x=labels,
+        y=peaks,
+        marker_color=cols,
+        text=[f"{v:.1f}" for v in peaks],
+        textposition="outside",
+        showlegend=False,
+        row=1,
+        col=2,
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=440,
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — community comfort & peak import, " f"all approaches",
+    )
     out = PLOTS_DIR / "17_comfort_peak_total.html"
     fig.write_html(out, include_plotlyjs=True)
     print(f"saved {out}")
@@ -1297,22 +1594,39 @@ def plot_consumption_timeseries(grids: dict, day: str) -> None:
         ax.axvspan(lo0, lo1, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
 
     yb = LOAD.mean(axis=0)
-    ax.step(*step(yb), where="post", color=MUTED, lw=1.3, ls="--",
-            label=f"base load only, no heating  (mean {yb.mean():.2f} kW)")
+    ax.step(
+        *step(yb),
+        where="post",
+        color=MUTED,
+        lw=1.3,
+        ls="--",
+        label=f"base load only, no heating  (mean {yb.mean():.2f} kW)",
+    )
 
     for lab, g in grids.items():
         y = np.asarray(g, float).mean(axis=0)
-        ax.step(*step(y), where="post", color=_DEV_COLOR.get(lab, "#777"), lw=2.1,
-                label=f"{lab}  (mean {y.mean():.2f} kW, peak {y.max():.2f} kW @ {int(y.argmax()):02d}h)")
+        ax.step(
+            *step(y),
+            where="post",
+            color=_DEV_COLOR.get(lab, "#777"),
+            lw=2.1,
+            label=f"{lab}  (mean {y.mean():.2f} kW, peak {y.max():.2f} kW @ {int(y.argmax()):02d}h)",
+        )
 
     ax.set_xlim(0, time_horizon)
     ax.set_xticks(range(0, time_horizon + 1, 3))
     ax.set_ylim(bottom=0)
     ax.set_xlabel("hour of day", color=INK, fontsize=10)
     ax.set_ylabel("average grid import per building (kW)", color=INK, fontsize=10)
-    ax.set_title(f"{pd.Timestamp(day):%A %d %b %Y} — community-average electricity drawn from the "
-                 f"grid  (shaded band = 17–22h high tariff)",
-                 color=INK, fontsize=11, fontweight="bold", loc="left", pad=10)
+    ax.set_title(
+        f"{pd.Timestamp(day):%A %d %b %Y} — community-average electricity drawn from the "
+        f"grid  (shaded band = 17–22h high tariff)",
+        color=INK,
+        fontsize=11,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     ax.tick_params(colors=MUTED, labelsize=8)
@@ -1324,9 +1638,13 @@ def plot_consumption_timeseries(grids: dict, day: str) -> None:
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"saved {out}")
-    pd.DataFrame({"hour": list(range(time_horizon)), "base_load_kW": yb,
-                  **{lab: np.asarray(g, float).mean(axis=0) for lab, g in grids.items()}}).to_csv(
-        PLOTS_DIR / "18_consumption_timeseries.csv", index=False)
+    pd.DataFrame(
+        {
+            "hour": list(range(time_horizon)),
+            "base_load_kW": yb,
+            **{lab: np.asarray(g, float).mean(axis=0) for lab, g in grids.items()},
+        }
+    ).to_csv(PLOTS_DIR / "18_consumption_timeseries.csv", index=False)
     _plotly_consumption_timeseries(grids, day)
 
 
@@ -1342,21 +1660,38 @@ def _plotly_consumption_timeseries(grids: dict, day: str) -> None:
 
     fig = go.Figure()
     yb = LOAD.mean(axis=0)
-    fig.add_trace(go.Scatter(x=hrs, y=sx(yb), name="base load only, no heating", line_shape="hv",
-                             line=dict(color=MUTED, width=1.4, dash="dash")))
+    fig.add_trace(
+        go.Scatter(
+            x=hrs,
+            y=sx(yb),
+            name="base load only, no heating",
+            line_shape="hv",
+            line=dict(color=MUTED, width=1.4, dash="dash"),
+        )
+    )
     for lab, g in grids.items():
         y = np.asarray(g, float).mean(axis=0)
-        fig.add_trace(go.Scatter(x=hrs, y=sx(y), name=f"{lab} (peak {y.max():.2f} kW)",
-                                 line_shape="hv",
-                                 line=dict(color=_DEV_COLOR.get(lab, "#777"), width=2.3)))
+        fig.add_trace(
+            go.Scatter(
+                x=hrs,
+                y=sx(y),
+                name=f"{lab} (peak {y.max():.2f} kW)",
+                line_shape="hv",
+                line=dict(color=_DEV_COLOR.get(lab, "#777"), width=2.3),
+            )
+        )
     lo0, lo1 = _hi_window()
     if lo0 is not None:
         fig.add_vrect(x0=lo0, x1=lo1, fillcolor=PRICE_HIGH_COLOR, opacity=0.12, line_width=0)
-    fig.update_layout(template="plotly_white", height=460, hovermode="x unified",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — community-average grid import",
-                      xaxis_title="hour of day",
-                      yaxis_title="average grid import per building (kW)",
-                      legend=dict(orientation="h", y=-0.2))
+    fig.update_layout(
+        template="plotly_white",
+        height=460,
+        hovermode="x unified",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — community-average grid import",
+        xaxis_title="hour of day",
+        yaxis_title="average grid import per building (kW)",
+        legend=dict(orientation="h", y=-0.2),
+    )
     fig.update_yaxes(rangemode="tozero")
     out = PLOTS_DIR / "18_consumption_timeseries.html"
     fig.write_html(out, include_plotlyjs=True)
@@ -1389,11 +1724,17 @@ def plot_cost_comparison(grids: dict, day: str) -> None:
     ax1.plot([], [], color=INK, lw=1.9, label="Community total (base load)")
     ax1.fill_between([], [], color=PRICE_HIGH_COLOR, alpha=0.2, label="High tariff (67 p/kWh)")
     ax1.fill_between([], [], color=PRICE_LOW_COLOR, alpha=0.2, label="Low tariff (4 p/kWh)")
+    ax1.fill_between([], [], color=PRICE_MEDIUM_COLOR, alpha=0.2, label="Medium tariff (12 p/kWh)")
     ax1.set_ylabel("Base electrical demand (kW)", color=INK, fontsize=10)
     ax1.set_ylim(0, LOAD.sum(axis=0).max() * 1.28)
-    ax1.set_title(f"{pd.Timestamp(day):%A %d %b %Y} — {n_buildings} buildings: demand and the "
-                  f"cost of every sharing scheme", color=INK, fontsize=12, fontweight="bold",
-                  loc="left", pad=10)
+    ax1.set_title(
+        f"{pd.Timestamp(day):%A %d %b %Y} — {n_buildings} buildings: demand and the " f"cost of every sharing scheme",
+        color=INK,
+        fontsize=12,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     ax1.legend(frameon=False, fontsize=8.5, loc="upper left", ncol=2)
 
     # --- Panel 2: cumulative community grid-electricity cost ---
@@ -1401,9 +1742,14 @@ def plot_cost_comparison(grids: dict, day: str) -> None:
     cum = {lab: np.cumsum(PRICE * np.asarray(g, float).sum(axis=0) * dt) for lab, g in grids.items()}
     for lab, cc in cum.items():
         ls = "--" if lab == "no_battery" else "-"
-        ax2.step(*step(cc), where="post", color=_DEV_COLOR.get(lab, "#777"),
-                 lw=2.4 if lab in ("shared", "own_battery") else 2.0, ls=ls,
-                 label=f"{lab}  (£{cc[-1]:.2f})")
+        ax2.step(
+            *step(cc),
+            where="post",
+            color=_DEV_COLOR.get(lab, "#777"),
+            lw=2.4 if lab in ("shared", "own_battery") else 2.0,
+            ls=ls,
+            label=f"{lab}  (£{cc[-1]:.2f})",
+        )
     if "own_battery" in cum and "shared" in cum:
         _, yo = step(cum["own_battery"])
         _, ys = step(cum["shared"])
@@ -1413,18 +1759,30 @@ def plot_cost_comparison(grids: dict, day: str) -> None:
         for k in ("exchange-ADMM", "bilateral ADMM"):
             if k in cum:
                 parts.append(f"{k} £{cum['own_battery'][-1] - cum[k][-1]:.2f}")
-        ax2.annotate("  ·  ".join(parts),
-                     xy=(time_horizon, (cum["own_battery"][-1] + cum["shared"][-1]) / 2),
-                     xytext=(-8, 0), textcoords="offset points", ha="right", va="center",
-                     fontsize=8.5, color=SHARED_COLOR, fontweight="bold")
+        ax2.annotate(
+            "  ·  ".join(parts),
+            xy=(time_horizon, (cum["own_battery"][-1] + cum["shared"][-1]) / 2),
+            xytext=(-8, 0),
+            textcoords="offset points",
+            ha="right",
+            va="center",
+            fontsize=8.5,
+            color=SHARED_COLOR,
+            fontweight="bold",
+        )
     ax2.set_ylabel("Cumulative community grid-electricity cost (£)", color=INK, fontsize=10)
     ax2.set_xlabel("Hour of day", color=INK, fontsize=10)
     ax2.set_ylim(bottom=0)
     if "no_battery" in cum:
         ax2.set_ylim(0, cum["no_battery"][-1] * 1.12)
-    ax2.set_title("Same storage, different coupling: own-battery vs pooled (central) vs the "
-                  "decentralised ADMM schemes", color=INK, fontsize=10.5, fontweight="bold",
-                  loc="left", pad=10)
+    ax2.set_title(
+        "Same storage, different coupling: own-battery vs pooled (central) vs the " "decentralised ADMM schemes",
+        color=INK,
+        fontsize=10.5,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     ax2.legend(frameon=False, fontsize=9, loc="upper left")
 
     for ax in (ax1, ax2):
@@ -1434,9 +1792,9 @@ def plot_cost_comparison(grids: dict, day: str) -> None:
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"saved {out}")
-    pd.DataFrame({"hour": list(range(time_horizon)),
-                  **{f"cum_cost_{lab}": cc for lab, cc in cum.items()}}).to_csv(
-        PLOTS_DIR / "19_cost_comparison.csv", index=False)
+    pd.DataFrame({"hour": list(range(time_horizon)), **{f"cum_cost_{lab}": cc for lab, cc in cum.items()}}).to_csv(
+        PLOTS_DIR / "19_cost_comparison.csv", index=False
+    )
     _plotly_cost_comparison(grids, cum, day)
 
 
@@ -1451,28 +1809,59 @@ def _plotly_cost_comparison(grids: dict, cum: dict, day: str) -> None:
     def sx(y):
         return list(y) + [y[-1]]
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09,
-                        subplot_titles=("Base electrical demand (kW)",
-                                        "Cumulative community grid-electricity cost (£)"))
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.09,
+        subplot_titles=("Base electrical demand (kW)", "Cumulative community grid-electricity cost (£)"),
+    )
     for b in range(n_buildings):
-        fig.add_trace(go.Scatter(x=hrs, y=sx(LOAD[b]), line=dict(color="rgba(59,107,176,.3)", width=1,
-                                 shape="hv"), showlegend=(b == 0), name="individual buildings",
-                                 legendgroup="ind", hoverinfo="skip"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=hrs, y=sx(LOAD.sum(axis=0)), line=dict(color="black", width=2, shape="hv"),
-                             name="community total"), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=hrs,
+                y=sx(LOAD[b]),
+                line=dict(color="rgba(59,107,176,.3)", width=1, shape="hv"),
+                showlegend=(b == 0),
+                name="individual buildings",
+                legendgroup="ind",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=hrs, y=sx(LOAD.sum(axis=0)), line=dict(color="black", width=2, shape="hv"), name="community total"
+        ),
+        row=1,
+        col=1,
+    )
     for lab, cc in cum.items():
         dash = "dash" if lab == "no_battery" else "solid"
-        fig.add_trace(go.Scatter(x=hrs, y=sx(cc), name=f"{lab} (£{cc[-1]:.2f})", line_shape="hv",
-                                 line=dict(color=_DEV_COLOR.get(lab, "#777"), width=2.4, dash=dash)),
-                      row=2, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=hrs,
+                y=sx(cc),
+                name=f"{lab} (£{cc[-1]:.2f})",
+                line_shape="hv",
+                line=dict(color=_DEV_COLOR.get(lab, "#777"), width=2.4, dash=dash),
+            ),
+            row=2,
+            col=1,
+        )
     lo0, lo1 = _hi_window()
     if lo0 is not None:
         for r in (1, 2):
             fig.add_vrect(x0=lo0, x1=lo1, fillcolor=PRICE_HIGH_COLOR, opacity=0.1, line_width=0, row=r, col=1)
     fig.update_xaxes(title_text="hour of day", dtick=3, row=2, col=1)
-    fig.update_layout(template="plotly_white", height=780, hovermode="x unified",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — cost of every sharing scheme",
-                      legend=dict(orientation="h", y=-0.08))
+    fig.update_layout(
+        template="plotly_white",
+        height=780,
+        hovermode="x unified",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — cost of every sharing scheme",
+        legend=dict(orientation="h", y=-0.08),
+    )
     out = PLOTS_DIR / "19_cost_comparison.html"
     fig.write_html(out, include_plotlyjs=True)
     print(f"saved {out}")
@@ -1490,13 +1879,21 @@ _SKIP_BILATERAL_ABOVE_N = int(os.environ.get("SHOWCASE_SKIP_BILATERAL_ABOVE_N", 
 
 def _comp_row(component, status, wall, **kw):
     row = {
-        "n_buildings": n_buildings, "time_horizon": time_horizon,
-        "component": component, "status": status,
+        "n_buildings": n_buildings,
+        "time_horizon": time_horizon,
+        "component": component,
+        "status": status,
         "wall_seconds": round(wall, 2) if wall is not None else "",
-        "iterations": "", "max_iterations": "", "converged": "",
-        "final_primal_resid": "", "final_dual_resid": "",
-        "community_op_cost_gbp": "", "community_peak_kW": "", "rms_cost_vs_central": "",
-        "n_trade_pairs": _N_PAIRS, "n_share_vars_central": _N_SHARE_VARS_CENTRAL,
+        "iterations": "",
+        "max_iterations": "",
+        "converged": "",
+        "final_primal_resid": "",
+        "final_dual_resid": "",
+        "community_op_cost_gbp": "",
+        "community_peak_kW": "",
+        "rms_cost_vs_central": "",
+        "n_trade_pairs": _N_PAIRS,
+        "n_share_vars_central": _N_SHARE_VARS_CENTRAL,
         "note": "",
     }
     row.update({k: v for k, v in kw.items() if v is not None})
@@ -1511,14 +1908,17 @@ def _try_central(label: str, **kw):
         r = solve_and_extract(build_model(**kw), label)
         wall = time.perf_counter() - t0
         peak = float(np.asarray(r["grid"], float).sum(axis=0).max())
-        return r, _comp_row(f"central:{label}", "ok", wall,
-                            community_op_cost_gbp=round(r["op_cost"], 2),
-                            community_peak_kW=round(peak, 2))
+        return r, _comp_row(
+            f"central:{label}",
+            "ok",
+            wall,
+            community_op_cost_gbp=round(r["op_cost"], 2),
+            community_peak_kW=round(peak, 2),
+        )
     except Exception as e:  # noqa: BLE001 - MemoryError / RuntimeError / solver error
         wall = time.perf_counter() - t0
         print(f"  ✗ central '{label}' unavailable — {type(e).__name__}: {e}")
-        return None, _comp_row(f"central:{label}", "failed", wall,
-                               note=f"{type(e).__name__}: {e}")
+        return None, _comp_row(f"central:{label}", "failed", wall, note=f"{type(e).__name__}: {e}")
 
 
 def run_exchange_admm(sh):
@@ -1532,27 +1932,40 @@ def run_exchange_admm(sh):
     except Exception as e:  # noqa: BLE001
         wall = time.perf_counter() - t0
         print(f"exchange-ADMM failed ({type(e).__name__}: {e})")
-        return None, None, None, _comp_row("exchange-ADMM", "failed", wall,
-                                           note=f"{type(e).__name__}: {e}")
+        return None, None, None, _comp_row("exchange-ADMM", "failed", wall, note=f"{type(e).__name__}: {e}")
     wall = time.perf_counter() - t0
     frac = SHARE_TRADE_FEE_FRAC
     settle_b = -np.array([(frac * PRICE * pex[b] * dt).sum() for b in range(n_buildings)])
     cost_b = S["elec_b"] + S["gas_b"] + settle_b
     rel = None
     if sh is not None:
-        rel = float(np.sqrt(np.mean(
-            ((cost_b - sh["cost_b"]) / np.maximum(np.abs(sh["cost_b"]), 1e-3)) ** 2)))
+        rel = float(np.sqrt(np.mean(((cost_b - sh["cost_b"]) / np.maximum(np.abs(sh["cost_b"]), 1e-3)) ** 2)))
     n_it = len(hist)
     fp, fd = float(hist[-1, 1]), float(hist[-1, 2])
     conv = bool(fp < EXC.EPS_PRIMAL and fd < EXC.EPS_DUAL)
     peak = float(_grid_from_subs(subs).sum(axis=0).max())
-    print(f"exchange-ADMM: {n_it} iters, community £{S['admm_op']:.2f}/day, {S['traded']:.1f} kWh traded"
-          + (f", RMS vs central {rel:.2%}" if rel is not None else ""))
-    return cost_b, rel, (pex, price, hist, subs, S), _comp_row(
-        "exchange-ADMM", "ok", wall, iterations=n_it, max_iterations=EXC.MAX_ITERS,
-        converged=conv, final_primal_resid=round(fp, 5), final_dual_resid=round(fd, 5),
-        community_op_cost_gbp=round(S["admm_op"], 2), community_peak_kW=round(peak, 2),
-        rms_cost_vs_central=(round(rel, 4) if rel is not None else None))
+    print(
+        f"exchange-ADMM: {n_it} iters, community £{S['admm_op']:.2f}/day, {S['traded']:.1f} kWh traded"
+        + (f", RMS vs central {rel:.2%}" if rel is not None else "")
+    )
+    return (
+        cost_b,
+        rel,
+        (pex, price, hist, subs, S),
+        _comp_row(
+            "exchange-ADMM",
+            "ok",
+            wall,
+            iterations=n_it,
+            max_iterations=EXC.MAX_ITERS,
+            converged=conv,
+            final_primal_resid=round(fp, 5),
+            final_dual_resid=round(fd, 5),
+            community_op_cost_gbp=round(S["admm_op"], 2),
+            community_peak_kW=round(peak, 2),
+            rms_cost_vs_central=(round(rel, 4) if rel is not None else None),
+        ),
+    )
 
 
 def run_bilateral_admm():
@@ -1565,21 +1978,35 @@ def run_bilateral_admm():
     except Exception as e:  # noqa: BLE001
         wall = time.perf_counter() - t0
         print(f"bilateral ADMM failed ({type(e).__name__}: {e})")
-        return None, None, None, _comp_row("bilateral ADMM", "failed", wall,
-                                           note=f"{type(e).__name__}: {e}")
+        return None, None, None, _comp_row("bilateral ADMM", "failed", wall, note=f"{type(e).__name__}: {e}")
     wall = time.perf_counter() - t0
     n_it = len(hist)
     fp, fd = float(hist[-1, 3]), float(hist[-1, 4])
     conv = bool(fp < BIL.EPS_PRIMAL and fd < BIL.EPS_DUAL)
     peak = float(_grid_from_subs(subs).sum(axis=0).max())
     rel = S["rel_err"] if np.isfinite(S["rel_err"]) else None
-    print(f"bilateral ADMM: {n_it} iters, community £{S['admm_op']:.2f}/day, {S['traded']:.1f} kWh traded"
-          + (f", RMS vs central {rel:.2%}" if rel is not None else ""))
-    return S["admm_cost_b"], rel, (subs, q_all, lam_all, Z, hist, S), _comp_row(
-        "bilateral ADMM", "ok", wall, iterations=n_it, max_iterations=BIL.MAX_ITERS,
-        converged=conv, final_primal_resid=round(fp, 5), final_dual_resid=round(fd, 5),
-        community_op_cost_gbp=round(S["admm_op"], 2), community_peak_kW=round(peak, 2),
-        rms_cost_vs_central=(round(rel, 4) if rel is not None else None))
+    print(
+        f"bilateral ADMM: {n_it} iters, community £{S['admm_op']:.2f}/day, {S['traded']:.1f} kWh traded"
+        + (f", RMS vs central {rel:.2%}" if rel is not None else "")
+    )
+    return (
+        S["admm_cost_b"],
+        rel,
+        (subs, q_all, lam_all, Z, hist, S),
+        _comp_row(
+            "bilateral ADMM",
+            "ok",
+            wall,
+            iterations=n_it,
+            max_iterations=BIL.MAX_ITERS,
+            converged=conv,
+            final_primal_resid=round(fp, 5),
+            final_dual_resid=round(fd, 5),
+            community_op_cost_gbp=round(S["admm_op"], 2),
+            community_peak_kW=round(peak, 2),
+            rms_cost_vs_central=(round(rel, 4) if rel is not None else None),
+        ),
+    )
 
 
 # ============================================================================
@@ -1590,49 +2017,70 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
         f"total storage {CAP.sum():.1f} kWh\n"
     )
     if n_buildings > 40:
-        print(f"! large community (N={n_buildings}): the central MIQCP has N²·T = "
-              f"{_N_SHARE_VARS_CENTRAL:,} sharing variables and bilateral ADMM has "
-              f"{_N_PAIRS:,} trade pairs — both may run out of memory or hit the solve "
-              f"time limit. Failures are caught; exchange-ADMM scales.\n")
+        print(
+            f"! large community (N={n_buildings}): the central MIQCP has N²·T = "
+            f"{_N_SHARE_VARS_CENTRAL:,} sharing variables and bilateral ADMM has "
+            f"{_N_PAIRS:,} trade pairs — both may run out of memory or hit the solve "
+            f"time limit. Failures are caught; exchange-ADMM scales.\n"
+        )
     _require_solver()
 
     comp = []
     if _SKIP_CENTRAL_ABOVE_N and n_buildings > _SKIP_CENTRAL_ABOVE_N:
-        print(f"central solves skipped (N={n_buildings} > SHOWCASE_SKIP_CENTRAL_ABOVE_N="
-              f"{_SKIP_CENTRAL_ABOVE_N})")
+        print(f"central solves skipped (N={n_buildings} > SHOWCASE_SKIP_CENTRAL_ABOVE_N=" f"{_SKIP_CENTRAL_ABOVE_N})")
         nb = ob = sh = None
         for _l in ("no_battery", "own_battery", "shared"):
-            comp.append(_comp_row(f"central:{_l}", "skipped", None,
-                                  note=f"N > SHOWCASE_SKIP_CENTRAL_ABOVE_N={_SKIP_CENTRAL_ABOVE_N}"))
+            comp.append(
+                _comp_row(
+                    f"central:{_l}", "skipped", None, note=f"N > SHOWCASE_SKIP_CENTRAL_ABOVE_N={_SKIP_CENTRAL_ABOVE_N}"
+                )
+            )
     else:
-        nb, r = _try_central("no_battery", use_battery=False, sharing=False); comp.append(r)
-        ob, r = _try_central("own_battery", use_battery=True, sharing=False); comp.append(r)
-        sh, r = _try_central("shared", use_battery=True, sharing=True); comp.append(r)
+        nb, r = _try_central("no_battery", use_battery=False, sharing=False)
+        comp.append(r)
+        ob, r = _try_central("own_battery", use_battery=True, sharing=False)
+        comp.append(r)
+        sh, r = _try_central("shared", use_battery=True, sharing=True)
+        comp.append(r)
     central_ok = nb is not None and ob is not None and sh is not None
 
     if central_ok:
         b_ben = nb["op_cost"] - ob["op_cost"]
         s_ben = ob["op_cost"] - sh["op_cost"]
-        print(f"\nno_battery £{nb['op_cost']:.2f}  own_battery £{ob['op_cost']:.2f}  "
-              f"shared £{sh['op_cost']:.2f}   (battery benefit £{b_ben:.2f}/day, "
-              f"sharing benefit £{s_ben:.2f}/day)\n")
+        print(
+            f"\nno_battery £{nb['op_cost']:.2f}  own_battery £{ob['op_cost']:.2f}  "
+            f"shared £{sh['op_cost']:.2f}   (battery benefit £{b_ben:.2f}/day, "
+            f"sharing benefit £{s_ben:.2f}/day)\n"
+        )
     else:
-        print("\n! central solves incomplete — the central sharing-cost figures "
-              "(06/07/08/11/13) will be skipped for this N\n")
+        print(
+            "\n! central solves incomplete — the central sharing-cost figures "
+            "(06/07/08/11/13) will be skipped for this N\n"
+        )
 
     exch_cost_b = bil_cost_b = exch_rel = bil_rel = None
     exch_bundle = bil_bundle = bil_S = None
     if with_admm:
         print("--- exchange-ADMM (pooled sharing, admm_energy_sharing) ---")
-        exch_cost_b, exch_rel, exch_bundle, r = run_exchange_admm(sh); comp.append(r)
+        exch_cost_b, exch_rel, exch_bundle, r = run_exchange_admm(sh)
+        comp.append(r)
         if _SKIP_BILATERAL_ABOVE_N and n_buildings > _SKIP_BILATERAL_ABOVE_N:
-            print(f"\nbilateral ADMM skipped (N={n_buildings} > SHOWCASE_SKIP_BILATERAL_ABOVE_N="
-                  f"{_SKIP_BILATERAL_ABOVE_N})")
-            comp.append(_comp_row("bilateral ADMM", "skipped", None,
-                                  note=f"N > SHOWCASE_SKIP_BILATERAL_ABOVE_N={_SKIP_BILATERAL_ABOVE_N}"))
+            print(
+                f"\nbilateral ADMM skipped (N={n_buildings} > SHOWCASE_SKIP_BILATERAL_ABOVE_N="
+                f"{_SKIP_BILATERAL_ABOVE_N})"
+            )
+            comp.append(
+                _comp_row(
+                    "bilateral ADMM",
+                    "skipped",
+                    None,
+                    note=f"N > SHOWCASE_SKIP_BILATERAL_ABOVE_N={_SKIP_BILATERAL_ABOVE_N}",
+                )
+            )
         else:
             print("\n--- bilateral consensus-ADMM (pairwise P2P, admm_bilateral_p2p) ---")
-            bil_cost_b, bil_rel, bil_bundle, r = run_bilateral_admm(); comp.append(r)
+            bil_cost_b, bil_rel, bil_bundle, r = run_bilateral_admm()
+            comp.append(r)
             bil_S = bil_bundle[-1] if bil_bundle is not None else None
 
     # ---- central-only figures (need all three central solves) ----
@@ -1640,6 +2088,7 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
         plot_showcase(nb, ob, sh, SHOWCASE_DAY)
         plot_building_schedules(sh, SHOWCASE_DAY, "shared")
         plot_building_schedules(ob, SHOWCASE_DAY, "own_battery")
+        plot_energy_sources_per_building(sh, SHOWCASE_DAY, "shared")
         plot_energy_share(sh, SHOWCASE_DAY)
         plot_building_benefit(ob, sh, SHOWCASE_DAY, bil=bil_S)
         try:
@@ -1650,9 +2099,13 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
         except ImportError:
             print("plotly not installed — skipped .html plots (pip install plotly)")
         plot_sharing_savings(
-            ob, sh, SHOWCASE_DAY,
-            exch_cost_b=exch_cost_b, bil_cost_b=bil_cost_b,
-            exch_rel_err=exch_rel, bil_rel_err=bil_rel,
+            ob,
+            sh,
+            SHOWCASE_DAY,
+            exch_cost_b=exch_cost_b,
+            bil_cost_b=bil_cost_b,
+            exch_rel_err=exch_rel,
+            bil_rel_err=bil_rel,
         )
 
     # ---- comfort / peak / consumption — from whatever solved ----
@@ -1662,7 +2115,9 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
             scen[lab] = {"T_in": res["T_in"], "grid": res["grid"]}
     if scen:
         _plot_comfort_peak_bars(
-            scen, SHOWCASE_DAY, "15_comfort_peak_scenarios",
+            scen,
+            SHOWCASE_DAY,
+            "15_comfort_peak_scenarios",
             "by scenario: per-building temperature deviation from setpoint & peak grid import",
         )
 
@@ -1670,14 +2125,14 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
     if sh is not None:
         method["central market"] = {"T_in": sh["T_in"], "grid": sh["grid"]}
     if exch_bundle is not None:
-        method["exchange-ADMM"] = {"T_in": _tin_from_subs(exch_bundle[3]),
-                                   "grid": _grid_from_subs(exch_bundle[3])}
+        method["exchange-ADMM"] = {"T_in": _tin_from_subs(exch_bundle[3]), "grid": _grid_from_subs(exch_bundle[3])}
     if bil_bundle is not None:
-        method["bilateral ADMM"] = {"T_in": _tin_from_subs(bil_bundle[0]),
-                                    "grid": _grid_from_subs(bil_bundle[0])}
+        method["bilateral ADMM"] = {"T_in": _tin_from_subs(bil_bundle[0]), "grid": _grid_from_subs(bil_bundle[0])}
     if len(method) > 1:
         _plot_comfort_peak_bars(
-            method, SHOWCASE_DAY, "16_comfort_peak_methods",
+            method,
+            SHOWCASE_DAY,
+            "16_comfort_peak_methods",
             "by method: per-building temperature deviation from setpoint & peak grid import",
         )
 
@@ -1710,9 +2165,20 @@ def main(with_admm: bool = True, admm_plots: bool = False) -> None:
     comp_path = PLOTS_DIR / "computational_analysis.csv"
     pd.DataFrame(comp).to_csv(comp_path, index=False)
     print(f"\nsaved {comp_path}")
-    print(pd.DataFrame(comp)[["component", "status", "wall_seconds", "iterations",
-                              "converged", "community_op_cost_gbp", "community_peak_kW",
-                              "rms_cost_vs_central"]].to_string(index=False))
+    print(
+        pd.DataFrame(comp)[
+            [
+                "component",
+                "status",
+                "wall_seconds",
+                "iterations",
+                "converged",
+                "community_op_cost_gbp",
+                "community_peak_kW",
+                "rms_cost_vs_central",
+            ]
+        ].to_string(index=False)
+    )
 
 
 if __name__ == "__main__":

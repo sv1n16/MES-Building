@@ -44,21 +44,29 @@ DATA_DIR.mkdir(exist_ok=True)
 
 PRICE_HIGH_COLOR = "#d98a29"
 PRICE_LOW_COLOR = "#5b8fc9"
+PRICE_MEDIUM_COLOR = "#8b78b5"
 
 # synthetic heating setpoint (the LCL data carries no thermal information)
 SETPOINT_BASE_C = 18.0
 SETPOINT_COMFORT_C = 21.0
-SETPOINT_COMFORT_HOURS = ((6, 8), (16, 22))   # 21 C morning + evening; 18 C otherwise
-OUTDOOR_TEMP_MEAN_C = 4.5     # synthetic: daily mean outdoor temperature
-OUTDOOR_TEMP_SWING_C = 3.0    # synthetic: half of peak-to-trough; min ~03:00, max ~15:00
+SETPOINT_COMFORT_HOURS = ((6, 8), (16, 22))  # 21 C morning + evening; 18 C otherwise
+OUTDOOR_TEMP_MEAN_C = 4.5  # synthetic: daily mean outdoor temperature
+OUTDOOR_TEMP_SWING_C = 3.0  # synthetic: half of peak-to-trough; min ~03:00, max ~15:00
 
 # --- heterogeneous community: asset each building gets, in select_diverse order ---
 BUILDING_ASSETS = [
-    "battery+pv", "pv",        "battery",    "none",
-    "battery+pv", "pv",        "battery",    "none",
-    "battery+pv", "none",
+    "battery+pv",
+    "pv",
+    "battery",
+    "none",
+    "battery+pv",
+    "pv",
+    "battery",
+    "none",
+    "battery+pv",
+    "none",
 ]
-PV_KWP = 3.5                 # installed PV capacity (kWp) for buildings that have PV
+PV_KWP = 3.5  # installed PV capacity (kWp) for buildings that have PV
 
 
 def building_assets(n: int) -> list[str]:
@@ -68,15 +76,43 @@ def building_assets(n: int) -> list[str]:
         return list(BUILDING_ASSETS)
     return (BUILDING_ASSETS * (n // len(BUILDING_ASSETS) + 1))[:n]
 
+
 UKPN_PV_CSV = (
-    Path(__file__).parent / "PV Data" / "2014-11-28 Cleansed and Processed"
-    / "EXPORT HourlyData" / "EXPORT HourlyData - Customer Endpoints.csv"
+    Path(__file__).parent
+    / "PV Data"
+    / "2014-11-28 Cleansed and Processed"
+    / "EXPORT HourlyData"
+    / "EXPORT HourlyData - Customer Endpoints.csv"
 )
 # fallback = the profile computed from UKPN_PV_CSV (Feb-mean, per kWp, kW)
-_PV_SHAPE_FEB = np.array([
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.018, 0.113, 0.246, 0.363,
-    0.406, 0.401, 0.383, 0.282, 0.175, 0.068, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0,
-])
+_PV_SHAPE_FEB = np.array(
+    [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.018,
+        0.113,
+        0.246,
+        0.363,
+        0.406,
+        0.401,
+        0.383,
+        0.282,
+        0.175,
+        0.068,
+        0.002,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+)
 
 
 def london_pv_shape(n_hours: int = 24) -> np.ndarray:
@@ -114,11 +150,12 @@ def _step(y):
 def plot_dataset(out: pd.DataFrame, batt: pd.DataFrame, day) -> None:
     """Visualise the collated optimisation inputs for the showcase day."""
     load_cols = [c for c in out.columns if c.startswith("load_")]
-    ids = [c[len("load_"):-len("_kw")] for c in load_cols]
+    ids = [c[len("load_") : -len("_kw")] for c in load_cols]
     L = out[load_cols].to_numpy(float).T
     PVb = out[[f"pv_{i}_kw" for i in ids]].to_numpy(float).T
     is_high = (out["tariff_label"] == "High").to_numpy()
     is_low = (out["tariff_label"] == "Low").to_numpy()
+    is_medium = ~(is_high | is_low)
 
     def shade(ax):
         for t in range(len(out)):
@@ -126,6 +163,8 @@ def plot_dataset(out: pd.DataFrame, batt: pd.DataFrame, day) -> None:
                 ax.axvspan(t, t + 1, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
             elif is_low[t]:
                 ax.axvspan(t, t + 1, color=PRICE_LOW_COLOR, alpha=0.13, lw=0)
+            elif is_medium[t]:
+                ax.axvspan(t, t + 1, color=PRICE_MEDIUM_COLOR, alpha=0.10, lw=0)
 
     fig, (a1, a2, a3, a4) = plt.subplots(4, 1, figsize=(11, 11.5))
 
@@ -138,8 +177,14 @@ def plot_dataset(out: pd.DataFrame, batt: pd.DataFrame, day) -> None:
     a1.plot([], [], color=INK, lw=1.9, label="community load")
     a1.plot([], [], color="#e0a800", lw=1.9, label=f"community PV ({int((PVb.max(axis=1) > 0).sum())} bldgs)")
     a1.set_ylabel("Power (kW)", color=INK, fontsize=10)
-    a1.set_title(f"{pd.Timestamp(day):%A %d %b %Y} — collated optimisation inputs",
-                 color=INK, fontsize=12, fontweight="bold", loc="left", pad=10)
+    a1.set_title(
+        f"{pd.Timestamp(day):%A %d %b %Y} — collated optimisation inputs",
+        color=INK,
+        fontsize=12,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     a1.legend(frameon=False, fontsize=8.5, ncol=2, loc="upper left")
 
     shade(a2)
@@ -147,10 +192,16 @@ def plot_dataset(out: pd.DataFrame, batt: pd.DataFrame, day) -> None:
     a2.set_ylabel("Electricity price (£/kWh)", color=INK, fontsize=10)
 
     shade(a3)
-    a3.step(*_step(out["outdoor_temp_c"].to_numpy()), where="post", color=PRICE_LOW_COLOR, lw=2,
-            label="outdoor (synthetic)")
-    a3.step(*_step(out["setpoint_c"].to_numpy()), where="post", color=INK, lw=1.5, ls="--",
-            label="setpoint (synthetic)")
+    a3.step(
+        *_step(out["outdoor_temp_c"].to_numpy()),
+        where="post",
+        color=PRICE_LOW_COLOR,
+        lw=2,
+        label="outdoor (synthetic)",
+    )
+    a3.step(
+        *_step(out["setpoint_c"].to_numpy()), where="post", color=INK, lw=1.5, ls="--", label="setpoint (synthetic)"
+    )
     a3.set_ylabel("Temperature (°C)", color=INK, fontsize=10)
     a3.set_xlabel("Hour of day", color=INK, fontsize=10)
     a3.set_ylim(0, 26)
@@ -158,20 +209,27 @@ def plot_dataset(out: pd.DataFrame, batt: pd.DataFrame, day) -> None:
 
     order = np.argsort(-batt["capacity_kwh"].to_numpy())
     xb = np.arange(len(ids))
-    a4.bar(xb - 0.19, batt["capacity_kwh"].to_numpy()[order], 0.36, color=CONSUMPTION_COLOR,
-           label="battery (kWh)")
+    a4.bar(xb - 0.19, batt["capacity_kwh"].to_numpy()[order], 0.36, color=CONSUMPTION_COLOR, label="battery (kWh)")
     a4.bar(xb + 0.19, batt["pv_kwp"].to_numpy()[order], 0.36, color="#e0a800", label="PV (kWp)")
     a4.set_xticks(xb)
     a4.set_xticklabels(
         [f"{i}\n{a}" for i, a in zip(batt["LCLid"].to_numpy()[order], batt["assets"].to_numpy()[order])],
-        rotation=45, ha="right", fontsize=7,
+        rotation=45,
+        ha="right",
+        fontsize=7,
     )
     a4.set_ylabel("capacity", color=INK, fontsize=10)
     nb = int((batt["capacity_kwh"] > 0).sum())
     npv = int((batt["pv_kwp"] > 0).sum())
-    a4.set_title(f"Heterogeneous assets: {nb} batteries ({batt['capacity_kwh'].sum():.0f} kWh), "
-                 f"{npv} PV ({batt['pv_kwp'].sum():.0f} kWp)", color=INK, fontsize=10,
-                 fontweight="bold", loc="left", pad=8)
+    a4.set_title(
+        f"Heterogeneous assets: {nb} batteries ({batt['capacity_kwh'].sum():.0f} kWh), "
+        f"{npv} PV ({batt['pv_kwp'].sum():.0f} kWp)",
+        color=INK,
+        fontsize=10,
+        fontweight="bold",
+        loc="left",
+        pad=8,
+    )
     a4.legend(frameon=False, fontsize=8)
 
     for ax in (a1, a2, a3):
@@ -202,41 +260,67 @@ def _plotly_dataset(out, batt, day, ids, L, is_high) -> None:
         from plotly.subplots import make_subplots
     except ImportError:
         return
-    idx = np.where(is_high)[0]
-    hi = (int(idx[0]), int(idx[-1]) + 1) if len(idx) else (None, None)
+    is_low = (out["tariff_label"] == "Low").to_numpy()
+    is_medium = ~(is_high | is_low)
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07,
-                        subplot_titles=("Electrical load (kW)", "Electricity price (£/kWh)",
-                                        "Temperature (°C)"))
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.07,
+        subplot_titles=("Electrical load (kW)", "Electricity price (£/kWh)", "Temperature (°C)"),
+    )
     for b in range(len(ids)):
         x, y = _step(L[b])
-        fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="rgba(59,107,176,.35)", width=1, shape="hv"),
-                                 name=ids[b], legendgroup="b", showlegend=(b == 0),
-                                 hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y,
+                line=dict(color="rgba(59,107,176,.35)", width=1, shape="hv"),
+                name=ids[b],
+                legendgroup="b",
+                showlegend=(b == 0),
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
     x, y = _step(L.sum(axis=0))
-    fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="black", width=2, shape="hv"),
-                             name="community load"), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(x=x, y=y, line=dict(color="black", width=2, shape="hv"), name="community load"), row=1, col=1
+    )
     pv_cols = [c for c in out.columns if c.startswith("pv_")]
     if pv_cols:
         x, y = _step(out[pv_cols].to_numpy(float).sum(axis=1))
-        fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="#e0a800", width=2, shape="hv"),
-                                 name="community PV"), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(x=x, y=y, line=dict(color="#e0a800", width=2, shape="hv"), name="community PV"), row=1, col=1
+        )
     x, y = _step(out["price_gbp_per_kwh"].to_numpy())
-    fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="#d98a29", width=2, shape="hv"),
-                             name="price"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="#d98a29", width=2, shape="hv"), name="price"), row=2, col=1)
     x, y = _step(out["outdoor_temp_c"].to_numpy())
-    fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="#5b8fc9", width=2, shape="hv"),
-                             name="outdoor (synthetic)"), row=3, col=1)
+    fig.add_trace(
+        go.Scatter(x=x, y=y, line=dict(color="#5b8fc9", width=2, shape="hv"), name="outdoor (synthetic)"), row=3, col=1
+    )
     x, y = _step(out["setpoint_c"].to_numpy())
-    fig.add_trace(go.Scatter(x=x, y=y, line=dict(color="black", width=1.5, shape="hv", dash="dash"),
-                             name="setpoint"), row=3, col=1)
-    if hi[0] is not None:
-        for r in (1, 2, 3):
-            fig.add_vrect(x0=hi[0], x1=hi[1], fillcolor="#d98a29", opacity=0.1, line_width=0,
-                          row=r, col=1)
+    fig.add_trace(
+        go.Scatter(x=x, y=y, line=dict(color="black", width=1.5, shape="hv", dash="dash"), name="setpoint"),
+        row=3,
+        col=1,
+    )
+    for mask, colour, opacity in ((is_low, "#5b8fc9", 0.08), (is_medium, "#8b78b5", 0.07), (is_high, "#d98a29", 0.10)):
+        for start in np.flatnonzero(mask & ~np.r_[False, mask[:-1]]):
+            stop = start
+            while stop + 1 < len(mask) and mask[stop + 1]:
+                stop += 1
+            for r in (1, 2, 3):
+                fig.add_vrect(x0=start, x1=stop + 1, fillcolor=colour, opacity=opacity, line_width=0, row=r, col=1)
     fig.update_xaxes(title_text="Hour of day", dtick=3, row=3, col=1)
-    fig.update_layout(template="plotly_white", height=800, hovermode="x unified",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — collated optimisation inputs")
+    fig.update_layout(
+        template="plotly_white",
+        height=800,
+        hovermode="x unified",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — collated optimisation inputs",
+    )
     out_html = PLOTS_DIR / "10_showcase_inputs.html"
     fig.write_html(out_html, include_plotlyjs=True)
     print(f"saved {out_html}")
@@ -245,9 +329,12 @@ def _plotly_dataset(out, batt, day, ids, L, is_high) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", type=int, default=10, help="community size (default 10)")
-    ap.add_argument("--day", default=None,
-                    help="showcase day YYYY-MM-DD; for --n != 10 defaults to showcase_latest.txt "
-                         "(the day is NOT re-ranked for scaled communities)")
+    ap.add_argument(
+        "--day",
+        default=None,
+        help="showcase day YYYY-MM-DD; for --n != 10 defaults to showcase_latest.txt "
+        "(the day is NOT re-ranked for scaled communities)",
+    )
     args = ap.parse_args()
     n = args.n
     scaled = n != 10
@@ -255,7 +342,8 @@ def main() -> None:
     if scaled:
         day_str = args.day or (
             (DATA_DIR / "showcase_latest.txt").read_text().strip()
-            if (DATA_DIR / "showcase_latest.txt").exists() else "2013-02-21"
+            if (DATA_DIR / "showcase_latest.txt").exists()
+            else "2013-02-21"
         )
         day = pd.Timestamp(day_str).normalize()
         print(f"Scaled community: N={n}, fixed day {day:%Y-%m-%d} (no day re-ranking)\n")
@@ -266,13 +354,15 @@ def main() -> None:
         day = ranking.index[0]
         stats = ranking.loc[day]
         print(f"Best showcase day: {day:%Y-%m-%d} ({day:%A})")
-        print(f"  isolated £{stats['cost_isolated']:.2f} | shared £{stats['cost_shared']:.2f} "
-              f"| sharing saves £{stats['share_benefit']:.2f}/day (proxy dispatch)\n")
+        print(
+            f"  isolated £{stats['cost_isolated']:.2f} | shared £{stats['cost_shared']:.2f} "
+            f"| sharing saves £{stats['share_benefit']:.2f}/day (proxy dispatch)\n"
+        )
 
     # --- half-hourly load for the day -> hourly mean kW (kWh per half hour, 2 per hour) ---
     block = wide.loc[wide.index.normalize() == day].sort_index()
     assert len(block) == 48, f"expected 48 half-hours, got {len(block)}"
-    load_kw_hh = block * 2.0                       # kWh/hh -> average kW over the half hour
+    load_kw_hh = block * 2.0  # kWh/hh -> average kW over the half hour
     load_hourly = load_kw_hh.resample("1h").mean()  # 24 rows, mean kW per hour
 
     labels = load_tariff_schedule().set_index("DateTime")["TariffLabel"].reindex(block.index)

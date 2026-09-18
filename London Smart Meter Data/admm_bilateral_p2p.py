@@ -55,7 +55,7 @@ import central_optimisation_showcase as C
 from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
-RHO = 16  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
+RHO = 1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
 #           iterations-to-converge bottoms at ρ≈8–16 (8 iters vs 19 at ρ=1), and ρ≥16
 #           also best matches central's minimal-routing solution (per-building cost RMS
 #           5.0% vs 7.5% mid-range; traded volume 8.6 vs 15.6 kWh). Identical result with
@@ -79,6 +79,7 @@ PV_B, HAS_BATTERY, PRICE = C.PV_B, C.HAS_BATTERY, C.PRICE
 NB = [[j for j in range(N) if j != b] for b in range(N)]  # neighbours of b
 PAIRS = [(a, b) for a in range(N) for b in range(a + 1, N)]  # unordered pairs
 PRICE_HIGH_COLOR, PRICE_LOW_COLOR, ADMM_COLOR = "#d98a29", "#5b8fc9", "#2e8b6e"
+PRICE_MEDIUM_COLOR = "#8b78b5"
 
 
 # ============================================================================
@@ -424,6 +425,8 @@ def _shade(ax):
             ax.axvspan(t, t + 1, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
         elif C.IS_LOW[t]:
             ax.axvspan(t, t + 1, color=PRICE_LOW_COLOR, alpha=0.13, lw=0)
+        elif C.IS_MEDIUM[t]:
+            ax.axvspan(t, t + 1, color=PRICE_MEDIUM_COLOR, alpha=0.10, lw=0)
 
 
 def plot_admm(hist, Z, S, day):
@@ -565,6 +568,396 @@ def plot_admm(hist, Z, S, day):
     _plotly(hist, Z, S, day)
 
 
+def plot_energy_sources_per_building(subs, S, day):
+    """Plot each building's electricity supply mix over the showcase day."""
+    edges = np.arange(T + 1)
+
+    def values(model, name):
+        variable = getattr(model, name)
+        return np.array([pyo.value(variable[t]) for t in range(T)], dtype=float)
+
+    def step(values):
+        values = np.asarray(values, dtype=float)
+        return edges, np.concatenate([values, values[-1:]])
+
+    source_names = ("PV", "Battery discharge", "P2P import", "Grid import")
+    source_colors = ("#e0a800", "#7b4bc9", "#2e8b6e", "#8a8f98")
+    fig, axes = plt.subplots(N, 1, figsize=(13, 1.9 * N), sharex=True, squeeze=False)
+
+    for b, building_id in enumerate(C.BUILDING_IDS):
+        ax = axes[b, 0]
+        _shade(ax)
+        grid = values(subs[b], "p_el")
+        discharge = values(subs[b], "discharge")
+        p_hp = values(subs[b], "p_hp")
+        p2p_import = np.maximum(-S["flow"][b], 0.0).sum(axis=0)
+        p2p_export = np.maximum(S["flow"][b], 0.0).sum(axis=0)
+        sources = np.vstack((C.PV_B[b], discharge, p2p_import, grid))
+        ax.stackplot(edges[:-1], sources, labels=source_names, colors=source_colors, alpha=0.82, step="post")
+        demand = C.LOAD[b] + p_hp
+        ax.step(*step(demand), where="post", color=INK, lw=1.4, label="Demand + heat pump")
+        if p2p_export.max() > 1e-6:
+            ax.step(
+                *step(-p2p_export),
+                where="post",
+                color="#c0392b",
+                lw=1.5,
+                ls="--",
+                label=f"P2P export / seller ({p2p_export.sum():.1f} kWh)",
+            )
+        seller_note = f"\nseller: {p2p_export.sum():.1f} kWh" if p2p_export.sum() > 1e-6 else "\nno sales"
+        ax.set_ylabel(f"{building_id}\n{C.ASSETS[b]}{seller_note}\nkW", fontsize=8)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, axis="y", color="#ededed", lw=0.7)
+        ax.set_axisbelow(True)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(colors=MUTED, labelsize=7)
+        if b == 0:
+            ax.set_title(
+                f"{day} - where each building's electricity comes from (bilateral ADMM)",
+                loc="left",
+                fontsize=11,
+                fontweight="bold",
+                pad=8,
+            )
+            ax.legend(frameon=False, fontsize=7.5, loc="upper left", ncol=5)
+
+    axes[-1, 0].set_xlabel("Hour of day", fontsize=9)
+    axes[-1, 0].set_xlim(0, T)
+    axes[-1, 0].set_xticks(range(0, T + 1, 3))
+    fig.tight_layout()
+    out = C.PLOTS_DIR / "23_energy_sources_per_building_bilateral.png"
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+    print(f"saved {out}")
+    _plotly_energy_sources_per_building(subs, S, day)
+
+
+def _plotly_energy_sources_per_building(subs, S, day):
+    """Interactive Plotly version of the bilateral source-mix plot."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        print("plotly not installed - skipped bilateral source-mix HTML plot")
+        return
+
+    hours = list(range(T)) + [T]
+    source_names = ("PV", "Battery discharge", "P2P import", "Grid import")
+    source_colors = ("#e0a800", "#7b4bc9", "#2e8b6e", "#8a8f98")
+    titles = []
+
+    for b, building_id in enumerate(C.BUILDING_IDS):
+        p2p_export = np.maximum(S["flow"][b], 0.0).sum(axis=0)
+        seller_note = f"seller: {p2p_export.sum():.1f} kWh" if p2p_export.sum() > 1e-6 else "no sales"
+        titles.append(f"{building_id} ({C.ASSETS[b]}; {seller_note})")
+
+    fig = make_subplots(rows=N, cols=1, shared_xaxes=True, vertical_spacing=0.012, subplot_titles=titles)
+    for b in range(N):
+        grid = np.array([pyo.value(subs[b].p_el[t]) for t in range(T)], dtype=float)
+        discharge = np.array([pyo.value(subs[b].discharge[t]) for t in range(T)], dtype=float)
+        p_hp = np.array([pyo.value(subs[b].p_hp[t]) for t in range(T)], dtype=float)
+        p2p_import = np.maximum(-S["flow"][b], 0.0).sum(axis=0)
+        p2p_export = np.maximum(S["flow"][b], 0.0).sum(axis=0)
+        sources = (C.PV_B[b], discharge, p2p_import, grid)
+
+        for name, colour, values in zip(source_names, source_colors, sources):
+            y = list(np.asarray(values, dtype=float)) + [float(values[-1])]
+            fig.add_trace(
+                go.Scatter(
+                    x=hours,
+                    y=y,
+                    name=name,
+                    legendgroup=name,
+                    showlegend=(b == 0),
+                    stackgroup=f"sources_{b}",
+                    line=dict(color=colour, width=0.8, shape="hv"),
+                    hovertemplate=f"{name}: %{{y:.2f}} kW<extra></extra>",
+                ),
+                row=b + 1,
+                col=1,
+            )
+
+        demand = C.LOAD[b] + p_hp
+        fig.add_trace(
+            go.Scatter(
+                x=hours,
+                y=list(demand) + [float(demand[-1])],
+                name="Demand + heat pump",
+                legendgroup="Demand + heat pump",
+                showlegend=(b == 0),
+                line=dict(color=INK, width=1.5, shape="hv"),
+                hovertemplate="Demand + heat pump: %{y:.2f} kW<extra></extra>",
+            ),
+            row=b + 1,
+            col=1,
+        )
+        if p2p_export.max() > 1e-6:
+            fig.add_trace(
+                go.Scatter(
+                    x=hours,
+                    y=list(-p2p_export) + [float(-p2p_export[-1])],
+                    name="P2P export / seller",
+                    legendgroup="P2P export / seller",
+                    showlegend=(b == 0),
+                    line=dict(color="#c0392b", width=1.5, dash="dash", shape="hv"),
+                    hovertemplate="P2P export: %{y:.2f} kW<extra></extra>",
+                ),
+                row=b + 1,
+                col=1,
+            )
+
+    fig.update_xaxes(title_text="Hour of day", dtick=3, row=N, col=1)
+    fig.update_yaxes(title_text="kW")
+    fig.update_layout(
+        template="plotly_white",
+        height=max(500, 210 * N),
+        hovermode="x unified",
+        title=f"{day} - where each building's electricity comes from (bilateral ADMM)",
+        legend=dict(orientation="h", y=1.01, yanchor="bottom"),
+    )
+    out = C.PLOTS_DIR / "23_energy_sources_per_building_bilateral.html"
+    fig.write_html(out, include_plotlyjs=True)
+    print(f"saved {out}")
+
+
+def _sharing_surplus_series(subs, S):
+    """Return export-capable energy and actual gross bilateral sharing.
+
+    Bilateral ADMM constrains gross exports by ``PV + battery discharge``.
+    This is deliberately not netted against local demand because the model can
+    serve local demand from grid import while exporting that available DER.
+    """
+    available = np.zeros(T)
+    for b in range(N):
+        discharge = np.array([pyo.value(subs[b].discharge[t]) for t in range(T)], dtype=float)
+        available += np.maximum(C.PV_B[b] + discharge, 0.0)
+
+    actual = np.zeros(T)
+    for z in S["flow"].values():
+        actual += np.maximum(z, 0.0).sum(axis=0)
+    if np.any(actual > available + 1e-6):
+        print("warning: actual bilateral sharing exceeds export-capable energy")
+    return available, actual
+
+
+def _sharing_destinations(subs, S):
+    """Break export-capable energy into shared, curtailed, and retained residual."""
+    available, actual = _sharing_surplus_series(subs, S)
+    curtailed = np.zeros(T)
+    for b in range(N):
+        curtailed += np.array([pyo.value(subs[b].curtail[t]) for t in range(T)], dtype=float)
+    retained = np.maximum(available - actual - curtailed, 0.0)
+    return actual, retained, curtailed
+
+
+def plot_sharing_surplus(subs, S, day):
+    """Plot surplus available for sharing against actual bilateral sharing."""
+    available, actual = _sharing_surplus_series(subs, S)
+    hours = np.arange(T)
+    edges = np.arange(T + 1)
+
+    def step(values):
+        values = np.asarray(values, dtype=float)
+        return edges, np.concatenate([values, values[-1:]])
+
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    _shade(ax)
+    ax.step(*step(available), where="post", color="#e0a800", lw=2.4, label="Export-capable energy (PV + battery)")
+    ax.step(*step(actual), where="post", color=ADMM_COLOR, lw=2.4, label="Actually shared")
+    ax.fill_between(
+        edges,
+        step(available)[1],
+        step(actual)[1],
+        step="post",
+        color="#e0a800",
+        alpha=0.16,
+        label="Surplus not shared",
+    )
+    ax.set_xlim(0, T)
+    ax.set_ylim(bottom=0)
+    ax.set_xticks(range(0, T + 1, 3))
+    ax.set_xlabel("Hour of day")
+    ax.set_ylabel("Energy per hour (kWh)")
+    ax.set_title(
+        f"{day} - available surplus versus actual bilateral sharing",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.legend(frameon=False, loc="upper left")
+    ax.grid(True, axis="y", color="#ededed", lw=0.8)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    out = C.PLOTS_DIR / "24_sharing_surplus_timeseries.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"saved {out}")
+    _plotly_sharing_surplus(available, actual, day)
+
+
+def plot_sharing_destinations(subs, S, day):
+    """Show where export-capable energy went when it was not shared."""
+    actual, retained, curtailed = _sharing_destinations(subs, S)
+    edges = np.arange(T + 1)
+
+    def step(values):
+        values = np.asarray(values, dtype=float)
+        return edges, np.concatenate([values, values[-1:]])
+
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    _shade(ax)
+    ax.stackplot(
+        edges[:-1],
+        actual,
+        retained,
+        curtailed,
+        labels=("Actually shared", "Retained locally / displaced grid import", "Curtailed / unused"),
+        colors=(ADMM_COLOR, "#5b8fc9", "#c0392b"),
+        alpha=0.82,
+        step="post",
+    )
+    ax.step(
+        *step(actual + retained + curtailed),
+        where="post",
+        color="#e0a800",
+        lw=2.2,
+        label="Export-capable energy (PV + battery)",
+    )
+    ax.set_xlim(0, T)
+    ax.set_ylim(bottom=0)
+    ax.set_xticks(range(0, T + 1, 3))
+    ax.set_xlabel("Hour of day")
+    ax.set_ylabel("Energy per hour (kWh)")
+    ax.set_title(
+        f"{day} - destinations of export-capable energy (bilateral ADMM)", loc="left", fontsize=12, fontweight="bold"
+    )
+    ax.legend(frameon=False, loc="upper left", ncol=4)
+    ax.grid(True, axis="y", color="#ededed", lw=0.8)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    out = C.PLOTS_DIR / "25_sharing_destinations_bilateral.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"saved {out}")
+    _plotly_sharing_destinations(actual, retained, curtailed, day)
+
+
+def _plotly_sharing_destinations(actual, retained, curtailed, day):
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("plotly not installed - skipped destinations HTML plot")
+        return
+
+    hours = list(range(T)) + [T]
+    series = (
+        ("Actually shared", actual, ADMM_COLOR),
+        ("Retained locally / displaced grid import", retained, "#5b8fc9"),
+        ("Curtailed / unused", curtailed, "#c0392b"),
+    )
+    fig = go.Figure()
+    for name, values, colour in series:
+        values = list(np.asarray(values, dtype=float))
+        fig.add_trace(
+            go.Scatter(
+                x=hours,
+                y=values + [values[-1]],
+                name=name,
+                stackgroup="destinations",
+                line=dict(color=colour, width=0.8, shape="hv"),
+                hovertemplate=f"{name}: %{{y:.2f}} kWh<extra></extra>",
+            )
+        )
+    total = np.asarray(actual) + np.asarray(retained) + np.asarray(curtailed)
+    fig.add_trace(
+        go.Scatter(
+            x=hours,
+            y=list(total) + [float(total[-1])],
+            name="Export-capable energy (PV + battery)",
+            line=dict(color="#e0a800", width=2.2, shape="hv"),
+            fill=None,
+            hovertemplate="Export-capable energy: %{y:.2f} kWh<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=500,
+        hovermode="x unified",
+        title=f"{day} - destinations of export-capable energy (bilateral ADMM)",
+        xaxis_title="Hour of day",
+        yaxis_title="Energy per hour (kWh)",
+        legend=dict(orientation="h", y=-0.18),
+    )
+    fig.update_xaxes(dtick=3)
+    fig.update_yaxes(rangemode="tozero")
+    out = C.PLOTS_DIR / "25_sharing_destinations_bilateral.html"
+    fig.write_html(out, include_plotlyjs=True)
+    print(f"saved {out}")
+
+
+def _plotly_sharing_surplus(available, actual, day):
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("plotly not installed - skipped surplus HTML plot")
+        return
+
+    hours = list(range(T)) + [T]
+    available = list(np.asarray(available, dtype=float))
+    actual = list(np.asarray(actual, dtype=float))
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=hours,
+            y=available + [available[-1]],
+            name="Export-capable energy (PV + battery)",
+            line=dict(color="#e0a800", width=2.5, shape="hv"),
+            hovertemplate="Export-capable energy: %{y:.2f} kWh<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=hours,
+            y=actual + [actual[-1]],
+            name="Actually shared",
+            line=dict(color=ADMM_COLOR, width=2.5, shape="hv"),
+            hovertemplate="Actually shared: %{y:.2f} kWh<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=hours,
+            y=available + [available[-1]],
+            name="Surplus not shared",
+            line=dict(color="#e0a800", width=0),
+            fill="tonexty",
+            fillcolor="rgba(224,168,0,0.16)",
+            hoverinfo="skip",
+            showlegend=True,
+        )
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=500,
+        hovermode="x unified",
+        title=f"{day} - available surplus versus actual bilateral sharing",
+        xaxis_title="Hour of day",
+        yaxis_title="Energy per hour (kWh)",
+        legend=dict(orientation="h", y=-0.18),
+    )
+    fig.update_xaxes(dtick=3)
+    fig.update_yaxes(rangemode="tozero")
+    out = C.PLOTS_DIR / "24_sharing_surplus_timeseries.html"
+    fig.write_html(out, include_plotlyjs=True)
+    print(f"saved {out}")
+
+
 def _plotly(hist, Z, S, day):
     try:
         import plotly.graph_objects as go
@@ -656,3 +1049,6 @@ if __name__ == "__main__":
     subs, q_all, lam_all, Z, hist = run_admm()
     S = summarise(subs, lam_all, Z, C.SHOWCASE_DAY)
     plot_admm(hist, Z, S, C.SHOWCASE_DAY)
+    plot_energy_sources_per_building(subs, S, C.SHOWCASE_DAY)
+    plot_sharing_surplus(subs, S, C.SHOWCASE_DAY)
+    plot_sharing_destinations(subs, S, C.SHOWCASE_DAY)

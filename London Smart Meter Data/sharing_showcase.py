@@ -13,7 +13,8 @@ Scenario (from the user's optimisation objective):
 Dispatch model (per day): every battery is full at 00:00 (charged overnight on the
 Low tariff), then discharges to cut grid import, no intraday recharge, no export.
 For a fixed daily kWh budget the cost-optimal policy is price water-filling:
-spend battery energy on the highest-price half-hours first. Both scenarios use
+spend battery energy on the highest-price half-hours first across Low, Medium,
+and High prices. Both scenarios use
 their own optimal policy, so the comparison is apples-to-apples.
 
   share_benefit(day) [£] = cost_isolated - cost_shared - trade_fee
@@ -40,17 +41,18 @@ from data_exploration import (
 )
 from plot_timeseries import CONSUMPTION_COLOR, INK, MUTED, PLOTS_DIR
 
-TARGET_HOURS = 2.0          # battery capacity = peak 30-min demand * TARGET_HOURS
+TARGET_HOURS = 2.0  # battery capacity = peak 30-min demand * TARGET_HOURS
 N_BUILDINGS = 10
-MIN_COMPLETE_DAYS = 300     # community drawn only from buildings this well covered
-MIN_DAILY_KWH = 4.0         # drop near-zero / vacant meters
-MIN_SHAPE_CV = 0.45         # drop flat "constant use" meters (CV of the mean day profile)
-SHARE_FEE_FRAC = 0.10       # seller-side P2P trade fee, as a fraction of the tariff price
-DT = 0.5                    # hours per half-hour slot
+MIN_COMPLETE_DAYS = 300  # community drawn only from buildings this well covered
+MIN_DAILY_KWH = 4.0  # drop near-zero / vacant meters
+MIN_SHAPE_CV = 0.45  # drop flat "constant use" meters (CV of the mean day profile)
+SHARE_FEE_FRAC = 0.10  # seller-side P2P trade fee, as a fraction of the tariff price
+DT = 0.5  # hours per half-hour slot
 
-SHARED_COLOR = "#2e8b6e"    # green - the "shared" scenario
+SHARED_COLOR = "#2e8b6e"  # green - the "shared" scenario
 PRICE_HIGH_COLOR = "#d98a29"
 PRICE_LOW_COLOR = "#5b8fc9"
+PRICE_MEDIUM_COLOR = "#8b78b5"
 
 
 def _prep(n_buildings: int = N_BUILDINGS, day=None) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
@@ -97,14 +99,18 @@ def _prep(n_buildings: int = N_BUILDINGS, day=None) -> tuple[pd.DataFrame, pd.Se
 
     caps = (
         estimate_battery_size_per_building(sub_all, target_hours=TARGET_HOURS)
-        .set_index("LCLid")["recommended_battery_kWh"].reindex(ids)
+        .set_index("LCLid")["recommended_battery_kWh"]
+        .reindex(ids)
     )
     sub = sub_all
     if day is not None:
         sub = sub_all[sub_all["DateTime"].dt.normalize() == pd.Timestamp(day).normalize()]
     wide = (
-        sub.groupby(["DateTime", "LCLid"])["KWH/hh (per half hour)"].sum()
-        .unstack("LCLid").reindex(columns=ids).sort_index()
+        sub.groupby(["DateTime", "LCLid"])["KWH/hh (per half hour)"]
+        .sum()
+        .unstack("LCLid")
+        .reindex(columns=ids)
+        .sort_index()
     )
 
     tariff = load_tariff_schedule().set_index("DateTime")["TariffLabel"]
@@ -141,8 +147,8 @@ def evaluate_days(wide: pd.DataFrame, caps: pd.Series, price: pd.Series) -> pd.D
         if p.isna().any():
             continue
         p = p.to_numpy(float)
-        load = block.to_numpy(float)                    # (48, B)
-        agg = load.sum(axis=1, keepdims=True)           # (48, 1)
+        load = block.to_numpy(float)  # (48, B)
+        agg = load.sum(axis=1, keepdims=True)  # (48, 1)
 
         grid_iso = _price_waterfill_grid(load, p, cap_v)
         grid_shr = _price_waterfill_grid(agg, p, cap_pool)[:, 0]
@@ -157,6 +163,8 @@ def evaluate_days(wide: pd.DataFrame, caps: pd.Series, price: pd.Series) -> pd.D
             {
                 "day": day.normalize(),
                 "total_load_kWh": float(agg.sum()),
+                "low_hh": int((p == TARIFF_PRICE_MAP["Low"]).sum()),
+                "medium_hh": int((p == TARIFF_PRICE_MAP["Medium"]).sum()),
                 "high_hh": int((p == TARIFF_PRICE_MAP["High"]).sum()),
                 "cost_nobatt": cost_nobatt,
                 "cost_isolated": cost_iso,
@@ -192,6 +200,8 @@ def plot_showcase(wide, caps, price, day, stats) -> None:
                 ax.axvspan(h, h + 0.5, color=PRICE_HIGH_COLOR, alpha=0.13, lw=0)
             elif p[i] == TARIFF_PRICE_MAP["Low"]:
                 ax.axvspan(h, h + 0.5, color=PRICE_LOW_COLOR, alpha=0.13, lw=0)
+            elif p[i] == TARIFF_PRICE_MAP["Medium"]:
+                ax.axvspan(h, h + 0.5, color=PRICE_MEDIUM_COLOR, alpha=0.10, lw=0)
 
     # Panel 1: demand shapes + community total, tariff periods shaded
     shade_tariff(ax1)
@@ -200,30 +210,59 @@ def plot_showcase(wide, caps, price, day, stats) -> None:
     ax1.plot(hours, agg * 2, color=INK, lw=1.8)
     ax1.plot([], [], color=CONSUMPTION_COLOR, alpha=0.6, label="Individual buildings (n=10)")
     ax1.plot([], [], color=INK, lw=1.8, label="Community total")
-    ax1.fill_between([], [], color=PRICE_HIGH_COLOR, alpha=0.2, label=f"High tariff ({TARIFF_PRICE_MAP['High']:.0f} p/kWh)")
-    ax1.fill_between([], [], color=PRICE_LOW_COLOR, alpha=0.2, label=f"Low tariff ({TARIFF_PRICE_MAP['Low']:.0f} p/kWh)")
+    ax1.fill_between(
+        [], [], color=PRICE_HIGH_COLOR, alpha=0.2, label=f"High tariff ({TARIFF_PRICE_MAP['High']:.0f} p/kWh)"
+    )
+    ax1.fill_between(
+        [], [], color=PRICE_LOW_COLOR, alpha=0.2, label=f"Low tariff ({TARIFF_PRICE_MAP['Low']:.0f} p/kWh)"
+    )
+    ax1.fill_between(
+        [], [], color=PRICE_MEDIUM_COLOR, alpha=0.2, label=f"Medium tariff ({TARIFF_PRICE_MAP['Medium']:.0f} p/kWh)"
+    )
     ax1.set_ylabel("Demand (kW)", color=INK, fontsize=10)
-    ax1.set_title(f"{day:%A %d %b %Y} — diverse demand across {len(block.columns)} buildings, "
-                  f"{stats['high_hh'] / 2:.1f} h at the High tariff",
-                  color=INK, fontsize=12, fontweight="bold", loc="left", pad=10)
+    ax1.set_title(
+        f"{day:%A %d %b %Y} — diverse demand across {len(block.columns)} buildings, "
+        f"{stats['high_hh'] / 2:.1f} h at the High tariff",
+        color=INK,
+        fontsize=12,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     ax1.legend(frameon=False, fontsize=8.5, loc="upper left", ncol=2)
 
     # Panel 2: cumulative electricity cost over the day
     shade_tariff(ax2)
     ax2.plot(hours, cum_cost_nb, color=MUTED, lw=1.6, ls="--", label=f"No battery  (£{stats['cost_nobatt']:.2f})")
-    ax2.plot(hours, cum_cost_iso, color=PRICE_HIGH_COLOR, lw=2.4, label=f"Own battery each  (£{stats['cost_isolated']:.2f})")
-    ax2.plot(hours, cum_cost_shr, color=SHARED_COLOR, lw=2.4, label=f"Shared battery pool  (£{stats['cost_shared']:.2f})")
+    ax2.plot(
+        hours, cum_cost_iso, color=PRICE_HIGH_COLOR, lw=2.4, label=f"Own battery each  (£{stats['cost_isolated']:.2f})"
+    )
+    ax2.plot(
+        hours, cum_cost_shr, color=SHARED_COLOR, lw=2.4, label=f"Shared battery pool  (£{stats['cost_shared']:.2f})"
+    )
     ax2.fill_between(hours, cum_cost_shr, cum_cost_iso, color=SHARED_COLOR, alpha=0.15)
-    ax2.annotate(f"sharing saves £{stats['share_benefit']:.2f}/day\n"
-                 f"({stats['shared_energy_kWh']:.1f} kWh routed between buildings)",
-                 xy=(hours[-1], (cum_cost_iso[-1] + cum_cost_shr[-1]) / 2),
-                 xytext=(-165, 0), textcoords="offset points", fontsize=9,
-                 color=SHARED_COLOR, va="center", fontweight="bold")
+    ax2.annotate(
+        f"sharing saves £{stats['share_benefit']:.2f}/day\n"
+        f"({stats['shared_energy_kWh']:.1f} kWh routed between buildings)",
+        xy=(hours[-1], (cum_cost_iso[-1] + cum_cost_shr[-1]) / 2),
+        xytext=(-165, 0),
+        textcoords="offset points",
+        fontsize=9,
+        color=SHARED_COLOR,
+        va="center",
+        fontweight="bold",
+    )
     ax2.set_ylabel("Cumulative electricity cost (£)", color=INK, fontsize=10)
     ax2.set_xlabel("Hour of day", color=INK, fontsize=10)
-    ax2.set_title(f"Same {cap_v.sum():.0f} kWh of storage: pooling it beats per-building batteries by "
-                  f"£{stats['share_benefit']:.2f} on top of the £{stats['battery_benefit']:.2f} the batteries already save",
-                  color=INK, fontsize=10.5, fontweight="bold", loc="left", pad=10)
+    ax2.set_title(
+        f"Same {cap_v.sum():.0f} kWh of storage: pooling it beats per-building batteries by "
+        f"£{stats['share_benefit']:.2f} on top of the £{stats['battery_benefit']:.2f} the batteries already save",
+        color=INK,
+        fontsize=10.5,
+        fontweight="bold",
+        loc="left",
+        pad=10,
+    )
     ax2.legend(frameon=False, fontsize=9, loc="upper left")
 
     for ax in (ax1, ax2):
@@ -253,8 +292,16 @@ if __name__ == "__main__":
 
     ranking = evaluate_days(wide, caps, price)
     print(f"Evaluated {len(ranking)} complete tariff-covered days. Top 10 by daily £ saved from sharing:\n")
-    cols = ["total_load_kWh", "high_hh", "cost_nobatt", "cost_isolated", "cost_shared",
-            "battery_benefit", "share_benefit", "shared_energy_kWh"]
+    cols = [
+        "total_load_kWh",
+        "high_hh",
+        "cost_nobatt",
+        "cost_isolated",
+        "cost_shared",
+        "battery_benefit",
+        "share_benefit",
+        "shared_energy_kWh",
+    ]
     print(ranking[cols].head(10).round(2).to_string())
 
     best = ranking.index[0]
