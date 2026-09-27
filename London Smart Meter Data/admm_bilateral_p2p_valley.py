@@ -82,6 +82,11 @@ PRICE_HIGH_COLOR, PRICE_LOW_COLOR, ADMM_COLOR = "#d98a29", "#5b8fc9", "#2e8b6e"
 PRICE_MEDIUM_COLOR = "#8b78b5"
 
 
+use_congestion = True
+congestion_weight = 0.01 + 0.04 * (C.PRICE - C.PRICE.min()) / (C.PRICE.max() - C.PRICE.min())
+# ingredient for approach 1 -- shapes the MARGINAL cost of importing
+
+
 # ============================================================================
 # BUILDING SUBPROBLEM  (local DER schedule + local copies of its trades)
 # ============================================================================
@@ -172,6 +177,11 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             + C.alpha * (mm.T_in[t] - C.T_SET[t]) ** 2
             for t in mm.t
         )
+        if use_congestion:
+            # approach 1: shapes the marginal cost of importing so that
+            # lam[t] and the battery schedule react by pushing import
+            # into the valley hours
+            cost += sum(congestion_weight[t] * mm.p_el[t] ** 2 for t in mm.t)
         lin = sum(mm.lam[k, t] * mm.q[k, t] for k in mm.k for t in mm.t)  # (32) λᵀx
         prox = (mm.rho / 2.0) * sum((mm.q[k, t] - mm.zloc[k, t]) ** 2 for k in mm.k for t in mm.t)
         # routing regulariser: identical to central's `routing_reg = 1e-4 * sent`.
