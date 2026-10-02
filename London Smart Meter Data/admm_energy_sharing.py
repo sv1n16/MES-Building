@@ -37,9 +37,9 @@ from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
 RHO = 1  # penalty parameter (£ / kW^2)
-MAX_ITERS = 200
-EPS_PRIMAL = 0.0001  # kW   – max_t | Σ_b pex_b[t] |
-EPS_DUAL = 0.0003  # kW   – scaled change in the consensus average
+MAX_ITERS = 1000
+EPS_PRIMAL = 1e-7  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
+EPS_DUAL = 1e-7  # kW   – scaled change in the consensus average
 RELAX_BINARIES = True  # False -> exact Binary charge/discharge indicator (MIQP subproblems,
 #                         matching central_optimisation_showcase); non-convex ADMM, convergence
 #                         no longer guaranteed. True -> relax cs to [0,1]: convex QP, provable.
@@ -75,7 +75,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.f = pyo.Var(m.t, bounds=(0, 1), initialize=0)
     m.q_boiler = pyo.Var(m.t, bounds=(0, C.max_thermal_power), initialize=0)
     m.gas = pyo.Var(m.t, domain=pyo.NonNegativeReals, initialize=0)
-    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=C.T_init)
+    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=float(C.INIT_T_IN[b]))
     m.pex = pyo.Var(m.t, initialize=0)  # net export to the pool
 
     m.rho = pyo.Param(initialize=RHO, mutable=True)
@@ -110,7 +110,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
 
     def thermal(mm, t):
         if t == 0:
-            return mm.T_in[t] == C.T_init
+            return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
     m.c_therm = pyo.Constraint(m.t, rule=thermal)

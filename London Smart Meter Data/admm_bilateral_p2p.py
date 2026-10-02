@@ -55,15 +55,15 @@ import central_optimisation_showcase as C
 from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
-RHO = 0.8  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
+RHO = 1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
 #           iterations-to-converge bottoms at ρ≈8–16 (8 iters vs 19 at ρ=1), and ρ≥16
 #           also best matches central's minimal-routing solution (per-building cost RMS
 #           5.0% vs 7.5% mid-range; traded volume 8.6 vs 15.6 kWh). Identical result with
 #           RELAX_BINARIES True or False (the charge/discharge binary is slack on the
 #           showcase day). Re-sweep if N changes.
-MAX_ITERS = 400
-EPS_PRIMAL = 1e-4  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
-EPS_DUAL = 1e-4  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
+MAX_ITERS = 1000
+EPS_PRIMAL = 1e-6  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
+EPS_DUAL = 1e-6  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
 ADAPT_RHO = False  # residual balancing (Boyd §3.4.1)
 STOP_STREAK = 2  # need this many consecutive iters below tol
 RELAX_BINARIES = True  # False -> exact Binary charge/discharge indicator (MIQP subproblems,
@@ -102,7 +102,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.f = pyo.Var(m.t, bounds=(0, 1), initialize=0)
     m.q_boiler = pyo.Var(m.t, bounds=(0, C.max_thermal_power), initialize=0)
     m.gas = pyo.Var(m.t, domain=pyo.NonNegativeReals, initialize=0)
-    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=C.T_init)
+    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=float(C.INIT_T_IN[b]))
     m.q = pyo.Var(m.k, m.t, initialize=0)  # b's copy of trade with NB[b][k] (+ = b delivers)
     m.qpos = pyo.Var(m.k, m.t, bounds=(0, None), initialize=0)  # gross delivered to NB[b][k]
     m.qneg = pyo.Var(m.k, m.t, bounds=(0, None), initialize=0)  # gross received from NB[b][k]
@@ -140,7 +140,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
 
     def thermal(mm, t):
         if t == 0:
-            return mm.T_in[t] == C.T_init
+            return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
     m.c_therm = pyo.Constraint(m.t, rule=thermal)
@@ -298,7 +298,7 @@ def run_admm():
         hist.append((i, prim, dual, r_rms, s_rms, traded, operating_cost, z_norm, lambda_norm))
         if i % 10 == 0:
             print(
-                f"  iter {i:3d}  primal(RMS) {r_rms:.4f} kW   dual(RMS) {s_rms:.4f}   "
+                f"  iter {i:3d}  primal(RMS) {r_rms:.8f} kW   dual(RMS) {s_rms:.4f}   "
                 f"traded {traded:6.1f} kWh   rho {rho:.1f}"
             )
 
@@ -369,12 +369,12 @@ def summarise(subs, lam_all, Z, day):
     admm_cost_b = elec_b + gas_b + settle_b
     admm_op = float((elec_b + gas_b).sum())
     net_export = np.array([flow[b].sum(axis=0) for b in range(N)])  # (b, t)
-    # headline "energy traded" = gross pairwise volume  Σ_pairs Σ_t |Z| -- the same
-    # definition as central's shared_energy_kWh (Σ of all directional energy_share),
-    # so the two columns are comparable.  net_served is the smaller "P2P net import
-    # served" figure (Σ of positive net export); shown as a sub-line, not compared.
+    # Gross traded energy counts both directions. Net quantities first offset
+    # each building's imports and exports at each timestep, then count each side.
     traded = 0.5 * sum(float(np.sum(np.abs(flow[b]))) for b in range(N))
-    net_served = float(np.maximum(net_export, 0).sum())
+    net_imports = -net_export
+    net_received = float(np.maximum(net_imports, 0.0).sum() * DT)
+    net_exported = float(np.maximum(-net_imports, 0.0).sum() * DT)
 
     # central reference — may be intractable at large N (N² sharing variables); the
     # decentralised result is still valid on its own, so degrade to ob=sh=None.
@@ -400,7 +400,9 @@ def summarise(subs, lam_all, Z, day):
         f"{'energy traded kWh/day':24}{traded:>16.1f}"
         + (f"{sh['shared_energy_kWh']:>18.1f}" if sh else f"{'n/a':>18}")
     )
-    print(f"{'  (P2P net import served)':24}{net_served:>16.1f}{'':>18}")
+    print(f"{'net energy received kWh/day':24}{net_received:>16.1f}{'':>18}")
+    print(f"{'net energy exported kWh/day':24}{net_exported:>16.1f}{'':>18}")
+    print(f"{'net community balance kWh/day':24}{net_received - net_exported:>16.3f}{'':>18}")
     print(f"{'RMS rel. error vs central':24}" + (f"{rel_err:>16.2%}" if sh else f"{'n/a':>16}") + f"{'':>18}")
     print(f"{'own-battery baseline £':24}{'':>16}" + (f"{ob['op_cost']:>18.2f}" if ob else f"{'n/a':>18}"))
     print("=" * 74)
@@ -419,7 +421,8 @@ def summarise(subs, lam_all, Z, day):
         admm_cost_b=admm_cost_b,
         admm_op=admm_op,
         traded=traded,
-        net_served=net_served,
+        net_received=net_received,
+        net_exported=net_exported,
         ob=ob,
         sh=sh,
         pp=pp,

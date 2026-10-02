@@ -55,15 +55,15 @@ import central_optimisation_showcase as C
 from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
-RHO = 0.8  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
+RHO = 1.1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
 #           iterations-to-converge bottoms at ρ≈8–16 (8 iters vs 19 at ρ=1), and ρ≥16
 #           also best matches central's minimal-routing solution (per-building cost RMS
 #           5.0% vs 7.5% mid-range; traded volume 8.6 vs 15.6 kWh). Identical result with
 #           RELAX_BINARIES True or False (the charge/discharge binary is slack on the
 #           showcase day). Re-sweep if N changes.
-MAX_ITERS = 400
-EPS_PRIMAL = 1e-4  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
-EPS_DUAL = 1e-4  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
+MAX_ITERS = 1000
+EPS_PRIMAL = 1e-5  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
+EPS_DUAL = 1e-5  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
 ADAPT_RHO = False  # residual balancing (Boyd §3.4.1)
 STOP_STREAK = 2  # need this many consecutive iters below tol
 RELAX_BINARIES = True  # False -> exact Binary charge/discharge indicator (MIQP subproblems,
@@ -107,7 +107,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.f = pyo.Var(m.t, bounds=(0, 1), initialize=0)
     m.q_boiler = pyo.Var(m.t, bounds=(0, C.max_thermal_power), initialize=0)
     m.gas = pyo.Var(m.t, domain=pyo.NonNegativeReals, initialize=0)
-    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=C.T_init)
+    m.T_in = pyo.Var(m.t, bounds=(0, None), initialize=float(C.INIT_T_IN[b]))
     m.q = pyo.Var(m.k, m.t, initialize=0)  # b's copy of trade with NB[b][k] (+ = b delivers)
     m.qpos = pyo.Var(m.k, m.t, bounds=(0, None), initialize=0)  # gross delivered to NB[b][k]
     m.qneg = pyo.Var(m.k, m.t, bounds=(0, None), initialize=0)  # gross received from NB[b][k]
@@ -145,7 +145,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
 
     def thermal(mm, t):
         if t == 0:
-            return mm.T_in[t] == C.T_init
+            return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
     m.c_therm = pyo.Constraint(m.t, rule=thermal)
@@ -308,7 +308,7 @@ def run_admm():
         hist.append((i, prim, dual, r_rms, s_rms, traded, operating_cost, z_norm, lambda_norm))
         if i % 10 == 0:
             print(
-                f"  iter {i:3d}  primal(RMS) {r_rms:.4f} kW   dual(RMS) {s_rms:.4f}   "
+                f"  iter {i:3d}  primal(RMS) {r_rms:.7f} kW   dual(RMS) {s_rms:.7f}   "
                 f"traded {traded:6.1f} kWh   rho {rho:.1f}"
             )
 

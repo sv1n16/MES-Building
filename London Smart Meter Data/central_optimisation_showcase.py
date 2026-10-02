@@ -62,8 +62,11 @@ SHOWCASE_DAY = _day_ptr.read_text().strip() if _day_ptr.exists() else "2013-02-2
 #   SHOWCASE_RELAX_CENTRAL_BINARIES  relax charging_state to [0,1] (helps large N)
 _DATASET_STEM = os.environ.get("SHOWCASE_DATASET", "").strip() or f"showcase_{SHOWCASE_DAY}"
 SOLVE_TIME_LIMIT = float(os.environ.get("SHOWCASE_SOLVE_TIMELIMIT", "0") or 0)
-RELAX_CENTRAL_BINARIES = (
-    os.environ.get("SHOWCASE_RELAX_CENTRAL_BINARIES", "").strip().lower() not in ("", "0", "false", "no")
+RELAX_CENTRAL_BINARIES = os.environ.get("SHOWCASE_RELAX_CENTRAL_BINARIES", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
 )
 
 data_hr = pd.read_csv(DATA_DIR / f"{_DATASET_STEM}.csv")
@@ -105,9 +108,7 @@ HAS_BATTERY = CAP > 1e-9
 # import INIT_SOC from here) all see the same values. Non-battery buildings: 0.
 INIT_SOC_SEED = 42
 INIT_SOC_FRAC_LO, INIT_SOC_FRAC_HI = 0.15, 0.85
-_init_soc_frac = np.random.default_rng(INIT_SOC_SEED).uniform(
-    INIT_SOC_FRAC_LO, INIT_SOC_FRAC_HI, size=n_buildings
-)
+_init_soc_frac = np.random.default_rng(INIT_SOC_SEED).uniform(INIT_SOC_FRAC_LO, INIT_SOC_FRAC_HI, size=n_buildings)
 INIT_SOC = np.where(HAS_BATTERY, _init_soc_frac * CAP, 0.0)
 if "assets" in batt.columns:
     ASSETS = batt.set_index("LCLid")["assets"].reindex(BUILDING_IDS).to_numpy(str)
@@ -117,16 +118,18 @@ else:
 # ---- physical parameters (unchanged from the original model) ----
 eta_charge = 0.9
 eta_discharge = 0.9
-p_th_nom = 12.0
+p_th_nom = 5.0
 T_ref = 7.0
 cop_base = 2.18
 T_init = 20.0
+INIT_T_IN_SEED = 43
+INIT_T_IN = np.random.default_rng(INIT_T_IN_SEED).uniform(18.0, 22.0, size=n_buildings)
 max_thermal_power = 20.0
 efficiency = 0.9
 gas_price = 5.0  # p/kWh
-hp_max_power = 12.0
+hp_max_power = 5.0
 alpha = 0.5  # comfort-penalty weight
-SHARE_TRADE_FEE_FRAC = 0.5
+SHARE_TRADE_FEE_FRAC = 0.8
 # How the P2P trading fee `frac` acts (no external operator in any of these):
 # "loss":    a fraction `frac` of every shared kWh is physically lost in transfer;
 #            the buyer receives only (1-frac). Community profit falls with frac.
@@ -150,9 +153,7 @@ def build_model(
     m.dt = pyo.Param(initialize=dt)
 
     # --- parameters ---
-    m.pv_supply = pyo.Param(
-        m.buildings, m.t, initialize={(b, t): float(PV_B[b, t]) for b in m.buildings for t in m.t}
-    )
+    m.pv_supply = pyo.Param(m.buildings, m.t, initialize={(b, t): float(PV_B[b, t]) for b in m.buildings for t in m.t})
     m.electric_load = pyo.Param(
         m.buildings, m.t, initialize={(b, t): float(LOAD[b, t]) for b in m.buildings for t in m.t}
     )
@@ -171,7 +172,8 @@ def build_model(
         initialize={(b, t): float(INIT_SOC[b]) for b in m.buildings for t in m.t},
     )
     m.charging_state = pyo.Var(
-        m.buildings, m.t,
+        m.buildings,
+        m.t,
         domain=pyo.NonNegativeReals if RELAX_CENTRAL_BINARIES else pyo.Binary,
         bounds=(0, 1) if RELAX_CENTRAL_BINARIES else None,
     )
@@ -190,7 +192,12 @@ def build_model(
     m.q_boiler_vars = pyo.Var(m.buildings, m.t, bounds=(0, max_thermal_power), initialize=0)
 
     # --- thermal ---
-    m.T_in = pyo.Var(m.buildings, m.t, bounds=(0, None), initialize=T_init)
+    m.T_in = pyo.Var(
+        m.buildings,
+        m.t,
+        bounds=(0, None),
+        initialize=lambda _model, b, _t: float(INIT_T_IN[b]),
+    )
 
     # --- energy sharing ---
     m.energy_share = pyo.Var(m.buildings, m.buildings, m.t, domain=pyo.NonNegativeReals, initialize=0)
@@ -255,7 +262,7 @@ def build_model(
 
     def thermal_dynamics_rule(mm, b, t):
         if t == 0:
-            return mm.T_in[b, t] == T_init
+            return mm.T_in[b, t] == float(INIT_T_IN[b])
         return mm.T_in[b, t] == mm.T_in[b, t - 1] + mm.dt / 10 * (
             mm.q_heat[b, t] - 0.5 * (mm.T_in[b, t - 1] - mm.T_out[b, t])
         )
@@ -375,7 +382,7 @@ def solve_and_extract(
     gas_t = gas_price / 100.0 * gas_cons.sum(axis=0) * dt  # £ per hour
     comfort = float(alpha * ((T_in - T_SET[None, :]) ** 2).sum())
 
-    traded_kWh = float(sent.sum())                 # gross energy sent (== gross received)
+    traded_kWh = float(sent.sum())  # gross energy sent (== gross received)
     seller_fee_b = (fee_frac * PRICE[None, :] * sent * dt).sum(axis=1)
     buyer_fee_b = (fee_frac * PRICE[None, :] * recv * dt).sum(axis=1)
     if fee_mode == "forfeit":
@@ -387,26 +394,26 @@ def solve_and_extract(
         energy_lost_kWh = 0.0
     elif fee_mode == "market":
         # buyer pays seller frac*price -> pure transfer, nets to zero community-wide
-        fee_b = buyer_fee_b                        # what each building pays out
-        seller_earn_b = seller_fee_b              # what each building receives
+        fee_b = buyer_fee_b  # what each building pays out
+        seller_earn_b = seller_fee_b  # what each building receives
         community_fee = 0.0
         fee_t = np.zeros(time_horizon)
         energy_lost_kWh = 0.0
     else:  # "loss"
         fee_b = np.zeros(n_buildings)
         seller_earn_b = np.zeros(n_buildings)
-        community_fee = 0.0                        # no cash; the cost is in extra grid import
+        community_fee = 0.0  # no cash; the cost is in extra grid import
         fee_t = np.zeros(time_horizon)
         energy_lost_kWh = fee_frac * traded_kWh
-    transfer_b = fee_b                             # back-compat alias
+    transfer_b = fee_b  # back-compat alias
 
     # ---- per-building operating cost (£/day) ----
     elec_b = (PRICE[None, :] * grid * dt).sum(axis=1)
     gas_b = gas_price / 100.0 * (gas_cons * dt).sum(axis=1)
     if fee_mode == "forfeit":
-        trade_cost_b = seller_fee_b + buyer_fee_b          # forfeited by each building
+        trade_cost_b = seller_fee_b + buyer_fee_b  # forfeited by each building
     elif fee_mode == "market":
-        trade_cost_b = buyer_fee_b - seller_fee_b          # net cash out (< 0 for net sellers)
+        trade_cost_b = buyer_fee_b - seller_fee_b  # net cash out (< 0 for net sellers)
     else:  # loss - cost already inside grid import
         trade_cost_b = np.zeros(n_buildings)
     cost_b = elec_b + gas_b + trade_cost_b
@@ -479,10 +486,10 @@ def sweep_trade_fee(fracs, fee_mode: str) -> tuple[pd.DataFrame, float, float]:
                 "fee_frac": frac,
                 "traded_kWh": r["shared_energy_kWh"],
                 "op_cost": r["op_cost"],
-                "sharing_benefit": ob["op_cost"] - r["op_cost"],   # community, vs own-battery
-                "community_fee": r["trade_fee"],                   # forfeit only
-                "market_transfer": r["market_transfer"],           # market only (buyer->seller £)
-                "energy_lost_kWh": r["energy_lost_kWh"],           # loss only
+                "sharing_benefit": ob["op_cost"] - r["op_cost"],  # community, vs own-battery
+                "community_fee": r["trade_fee"],  # forfeit only
+                "market_transfer": r["market_transfer"],  # market only (buyer->seller £)
+                "energy_lost_kWh": r["energy_lost_kWh"],  # loss only
                 "seller_fee": r["seller_fee"],
                 "buyer_fee": r["buyer_fee"],
             }
@@ -500,8 +507,14 @@ def plot_fee_sweep(dfs: dict, ob_op: float, nb_op: float, day: str) -> None:
         a1.plot(x, d["traded_kWh"], "-o", color=c, lw=2, label=_MODE_LABEL[mode])
         a2.plot(x, d["sharing_benefit"], "-o", color=c, lw=2, label=mode)
         y3 = d["market_transfer"].to_numpy() if mode == "market" else base - d["sharing_benefit"].to_numpy()
-        a3.plot(x, y3, "-o", color=c, lw=2,
-                label=("market: £ moved buyer→seller" if mode == "market" else f"{mode}: community £ lost"))
+        a3.plot(
+            x,
+            y3,
+            "-o",
+            color=c,
+            lw=2,
+            label=("market: £ moved buyer→seller" if mode == "market" else f"{mode}: community £ lost"),
+        )
 
     a2.axhline(base, color=MUTED, ls=":", lw=1)
     a2.text(0.02, base, f"  benefit at zero fee = £{base:.2f}", fontsize=7.5, va="bottom", color=MUTED)
@@ -509,11 +522,21 @@ def plot_fee_sweep(dfs: dict, ob_op: float, nb_op: float, day: str) -> None:
     a1.set_ylabel("energy traded (kWh/day)", fontsize=9)
     a1.set_title("Trading volume", color=INK, fontsize=10, fontweight="bold", loc="left")
     a2.set_ylabel("community profit kept (£/day)", fontsize=9)
-    a2.set_title("Profit vs fee: loss & forfeit decline, market stays flat",
-                 color=INK, fontsize=10, fontweight="bold", loc="left")
+    a2.set_title(
+        "Profit vs fee: loss & forfeit decline, market stays flat",
+        color=INK,
+        fontsize=10,
+        fontweight="bold",
+        loc="left",
+    )
     a3.set_ylabel("£/day", fontsize=9)
-    a3.set_title("Value destroyed (loss, forfeit) vs merely moved (market)",
-                 color=INK, fontsize=10, fontweight="bold", loc="left")
+    a3.set_title(
+        "Value destroyed (loss, forfeit) vs merely moved (market)",
+        color=INK,
+        fontsize=10,
+        fontweight="bold",
+        loc="left",
+    )
     for ax in (a1, a2, a3):
         for sp in ("top", "right"):
             ax.spines[sp].set_visible(False)
@@ -527,7 +550,11 @@ def plot_fee_sweep(dfs: dict, ob_op: float, nb_op: float, day: str) -> None:
     fig.suptitle(
         f"{pd.Timestamp(day):%A %d %b %Y} — P2P trading fee: three interpretations (no operator; "
         f"own-battery baseline £{ob_op:.2f}/day; dotted x = current fee {SHARE_TRADE_FEE_FRAC:g})",
-        color=INK, fontsize=12, fontweight="bold", x=0.02, ha="left",
+        color=INK,
+        fontsize=12,
+        fontweight="bold",
+        x=0.02,
+        ha="left",
     )
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     out = PLOTS_DIR / "09_trade_fee_sweep.png"
@@ -541,30 +568,67 @@ def plotly_fee_sweep(dfs: dict, ob_op: float, nb_op: float, day: str) -> None:
     from plotly.subplots import make_subplots
 
     base = float(dfs["market"]["sharing_benefit"].iloc[0])
-    fig = make_subplots(rows=1, cols=3, horizontal_spacing=0.07,
-                        subplot_titles=("Energy traded (kWh/day)",
-                                        "Community profit kept (£/day)",
-                                        "Value destroyed / moved (£/day)"))
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        horizontal_spacing=0.07,
+        subplot_titles=("Energy traded (kWh/day)", "Community profit kept (£/day)", "Value destroyed / moved (£/day)"),
+    )
     for mode, d in dfs.items():
         x = d["fee_frac"].to_numpy()
         c = _MODE_COLOR[mode]
-        fig.add_trace(go.Scatter(x=x, y=d["traded_kWh"], mode="lines+markers", name=mode,
-                                 legendgroup=mode, line=dict(color=c, width=2.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=x, y=d["sharing_benefit"], mode="lines+markers", name=mode,
-                                 legendgroup=mode, showlegend=False, line=dict(color=c, width=2.5)),
-                      row=1, col=2)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=d["traded_kWh"],
+                mode="lines+markers",
+                name=mode,
+                legendgroup=mode,
+                line=dict(color=c, width=2.5),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=d["sharing_benefit"],
+                mode="lines+markers",
+                name=mode,
+                legendgroup=mode,
+                showlegend=False,
+                line=dict(color=c, width=2.5),
+            ),
+            row=1,
+            col=2,
+        )
         y3 = d["market_transfer"] if mode == "market" else base - d["sharing_benefit"]
-        fig.add_trace(go.Scatter(x=x, y=y3, mode="lines+markers", name=mode, legendgroup=mode,
-                                 showlegend=False, line=dict(color=c, width=2.5)), row=1, col=3)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y3,
+                mode="lines+markers",
+                name=mode,
+                legendgroup=mode,
+                showlegend=False,
+                line=dict(color=c, width=2.5),
+            ),
+            row=1,
+            col=3,
+        )
     fig.add_hline(y=base, line=dict(color="#8a8f98", dash="dot"), row=1, col=2)
     for cc in (1, 2, 3):
         fig.add_vline(x=SHARE_TRADE_FEE_FRAC, line=dict(color="#8a8f98", dash="dot"), row=1, col=cc)
         fig.update_xaxes(title_text="trade-fee fraction of grid price", row=1, col=cc)
         fig.update_yaxes(rangemode="tozero", row=1, col=cc)
-    fig.update_layout(template="plotly_white", height=460, hovermode="x unified",
-                      title=f"{pd.Timestamp(day):%A %d %b %Y} — P2P trading fee: loss vs forfeit vs "
-                            f"market (no operator; own-battery baseline £{ob_op:.2f}/day)",
-                      legend=dict(orientation="h", y=-0.22))
+    fig.update_layout(
+        template="plotly_white",
+        height=460,
+        hovermode="x unified",
+        title=f"{pd.Timestamp(day):%A %d %b %Y} — P2P trading fee: loss vs forfeit vs "
+        f"market (no operator; own-battery baseline £{ob_op:.2f}/day)",
+        legend=dict(orientation="h", y=-0.22),
+    )
     out = PLOTS_DIR / "09_trade_fee_sweep.html"
     fig.write_html(out, include_plotlyjs=True)
     print(f"saved {out}")
