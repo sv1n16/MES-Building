@@ -29,6 +29,8 @@ Use ``--no-admm`` for a quick central-versus-rule comparison.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from io import StringIO
 from pathlib import Path
 
@@ -49,27 +51,30 @@ PLOT_FILE = OUTPUT_DIR / "22_energy_sharing_method_comparison.png"
 SURPLUS_PLOT_FILE = OUTPUT_DIR / "22_sharing_surplus_comparison.png"
 DESTINATION_PLOT_FILE = OUTPUT_DIR / "25_sharing_destinations_comparison.png"
 GRID_SAVING_PLOT_FILE = OUTPUT_DIR / "26_shared_energy_vs_grid_saving.png"
+COST_SAVING_PLOT_FILE = OUTPUT_DIR / "26_shared_energy_vs_cost_saving.png"
+CACHE_FILE = OUTPUT_DIR / "22_energy_sharing_method_comparison.results.json"
 HEATMAP_PLOT_FILE = OUTPUT_DIR / "23_building_grid_import_heatmap.png"
 SHARED_HEATMAP_PLOT_FILE = OUTPUT_DIR / "24_building_shared_energy_heatmap.png"
+GAS_HEATMAP_PLOT_FILE = OUTPUT_DIR / "33_building_gas_import_heatmap.png"
 BUILDING_COMPARISON_FILE = OUTPUT_DIR / "28_building_method_comparison.csv"
 BUILDING_SAVINGS_PLOT_FILE = OUTPUT_DIR / "29_building_cost_savings_heatmap.png"
 BUILDING_COST_BARS_FILE = OUTPUT_DIR / "30_building_cost_comparison.png"
+BILATERAL_VALLEY_PLOT_FILE = OUTPUT_DIR / "22_bilateral_admm_valley_comparison.png"
 METHOD_COLORS = {
     "centralised no-sharing": "#555555",
     "rule-based": "#8a8f98",
     "central": "#2e8b6e",
     "exchange-ADMM": "#3b6bb0",
-    "bilateral ADMM": "#c0392b",
-    "bilateral ADMM (no valley fill)": "#b08a5a",
-    "bilateral ADMM + valley filling": "#c0392b",
+    "bilateral ADMM": "#b08a5a",
+    "bilateral ADMM + peak reduction": "#c0392b",
 }
 METHOD_ORDER = (
     "centralised no-sharing",
     "rule-based",
     "central",
     "exchange-ADMM",
-    "bilateral ADMM (no valley fill)",
-    "bilateral ADMM + valley filling",
+    "bilateral ADMM",
+    "bilateral ADMM + peak reduction",
 )
 
 
@@ -95,6 +100,11 @@ def _grid_peak_hour(grid: np.ndarray) -> int:
 def _grid_import_total(grid: np.ndarray) -> float:
     """Return total community electricity imported from the grid in kWh."""
     return float(np.asarray(grid, dtype=float).sum() * C.dt)
+
+
+def _gas_import_total(gas_kw: np.ndarray) -> float:
+    """Return total community gas consumption in kWh/day from hourly kW rates."""
+    return float(np.asarray(gas_kw, dtype=float).sum() * C.dt)
 
 
 def _building_energy_cost(grid: np.ndarray, gas: np.ndarray) -> np.ndarray:
@@ -225,6 +235,7 @@ def _thermal_rule() -> tuple[np.ndarray, np.ndarray]:
 def run_no_sharing() -> dict:
     """Solve the common no-P2P baseline used by every sharing comparison."""
     result = C.solve_and_extract(C.build_model(True, False), "comparison_no_sharing")
+    gas = np.asarray(result["q_boiler"], dtype=float) / C.efficiency
     bought, sold, net = _community_trade_balance(np.zeros((C.n_buildings, C.time_horizon)))
     return {
         "method": "centralised no-sharing",
@@ -232,6 +243,7 @@ def run_no_sharing() -> dict:
         "peak_grid_import_kw": _grid_peak(result["grid"]),
         "peak_grid_import_hour": _grid_peak_hour(result["grid"]),
         "grid_import_kwh_per_day": _grid_import_total(result["grid"]),
+        "gas_import_kwh_per_day": _gas_import_total(gas),
         "grid_saving_kwh_per_day": 0.0,
         "thermal_comfort_rms_degC": _rms_comfort(result["T_in"]),
         "thermal_comfort_max_deviation_degC": _max_temperature_deviation(result["T_in"]),
@@ -242,6 +254,7 @@ def run_no_sharing() -> dict:
         "community_energy_balance_error_kwh_per_day": abs(net),
         "_grid_series": result["grid"].sum(axis=0),
         "_grid_per_building": np.asarray(result["grid"], dtype=float),
+        "_gas_import_hourly_per_building": gas,
         "_energy_cost_per_building": np.asarray(result["elec_b"] + result["gas_b"], dtype=float),
         "_temperature_per_building": np.asarray(result["T_in"], dtype=float),
         "_grid_baseline_total": _grid_import_total(result["grid"]),
@@ -284,6 +297,7 @@ def run_rule_based() -> dict:
         "peak_grid_import_kw": _grid_peak(grid),
         "peak_grid_import_hour": _grid_peak_hour(grid),
         "grid_import_kwh_per_day": _grid_import_total(grid),
+        "gas_import_kwh_per_day": _gas_import_total(gas),
         "grid_saving_kwh_per_day": _grid_import_total(baseline_grid) - _grid_import_total(grid),
         "thermal_comfort_rms_degC": _rms_comfort(t_in),
         "thermal_comfort_max_deviation_degC": _max_temperature_deviation(t_in),
@@ -294,6 +308,7 @@ def run_rule_based() -> dict:
         "community_energy_balance_error_kwh_per_day": abs(net),
         "_grid_series": grid.sum(axis=0),
         "_grid_per_building": np.asarray(grid, dtype=float),
+        "_gas_import_hourly_per_building": np.asarray(gas, dtype=float),
         "_energy_cost_per_building": _building_energy_cost(grid, gas),
         "_temperature_per_building": np.asarray(t_in, dtype=float),
         "_grid_baseline_total": _grid_import_total(baseline_grid),
@@ -315,6 +330,7 @@ def run_central() -> dict:
         fee_frac=C.SHARE_TRADE_FEE_FRAC,
         fee_mode="market",
     )
+    gas = np.asarray(result["q_boiler"], dtype=float) / C.efficiency
     shared_net = _net_from_pairwise_matrix(result["share"])
     bought, sold, net = _community_trade_balance(shared_net)
     return {
@@ -323,6 +339,7 @@ def run_central() -> dict:
         "peak_grid_import_kw": _grid_peak(result["grid"]),
         "peak_grid_import_hour": _grid_peak_hour(result["grid"]),
         "grid_import_kwh_per_day": _grid_import_total(result["grid"]),
+        "gas_import_kwh_per_day": _gas_import_total(gas),
         "grid_saving_kwh_per_day": _grid_import_total(baseline["grid"]) - _grid_import_total(result["grid"]),
         "thermal_comfort_rms_degC": _rms_comfort(result["T_in"]),
         "thermal_comfort_max_deviation_degC": _max_temperature_deviation(result["T_in"]),
@@ -333,6 +350,7 @@ def run_central() -> dict:
         "community_energy_balance_error_kwh_per_day": abs(net),
         "_grid_series": result["grid"].sum(axis=0),
         "_grid_per_building": np.asarray(result["grid"], dtype=float),
+        "_gas_import_hourly_per_building": gas,
         "_energy_cost_per_building": np.asarray(result["elec_b"] + result["gas_b"], dtype=float),
         "_temperature_per_building": np.asarray(result["T_in"], dtype=float),
         "_grid_baseline_total": _grid_import_total(baseline["grid"]),
@@ -363,6 +381,7 @@ def run_exchange_admm() -> dict:
         "peak_grid_import_kw": _grid_peak(grid),
         "peak_grid_import_hour": _grid_peak_hour(grid),
         "grid_import_kwh_per_day": _grid_import_total(grid),
+        "gas_import_kwh_per_day": _gas_import_total(gas),
         "grid_saving_kwh_per_day": _grid_import_total(baseline["grid"]) - _grid_import_total(grid),
         "thermal_comfort_rms_degC": _rms_comfort(t_in),
         "thermal_comfort_max_deviation_degC": _max_temperature_deviation(t_in),
@@ -373,6 +392,7 @@ def run_exchange_admm() -> dict:
         "community_energy_balance_error_kwh_per_day": abs(net),
         "_grid_series": grid.sum(axis=0),
         "_grid_per_building": np.asarray(grid, dtype=float),
+        "_gas_import_hourly_per_building": np.asarray(gas, dtype=float),
         "_energy_cost_per_building": _building_energy_cost(grid, gas),
         "_temperature_per_building": np.asarray(t_in, dtype=float),
         "_grid_baseline_total": _grid_import_total(baseline["grid"]),
@@ -389,11 +409,11 @@ def run_exchange_admm() -> dict:
 
 
 def _run_bilateral_admm_variant(use_valley: bool) -> dict:
-    """Run the bilateral ADMM with or without the valley-filling import-shaping term.
+    """Run bilateral ADMM with or without the price-shaped peak-reduction term.
 
-    The model's module-level ``use_congestion`` flag is the valley-filling knob in
-    ``admm_bilateral_p2p_valley.py``: setting it to ``True`` adds a convex import
-    cost term that shifts flexible demand into lower-price hours. This helper
+    The module-level ``use_congestion`` flag adds a convex, price-shaped grid
+    import cost that encourages flexible demand to move away from expensive
+    peak hours. This helper
     exposes that behaviour in the same comparison workflow as the other methods.
     """
     previous = bool(BIL.use_congestion)
@@ -412,13 +432,14 @@ def _run_bilateral_admm_variant(use_valley: bool) -> dict:
     baseline = C.solve_and_extract(C.build_model(True, False), "comparison_bilateral_baseline")
     shared_net = _net_from_trade_dict(trades, C.n_buildings, C.time_horizon)
     bought, sold, net = _community_trade_balance(shared_net)
-    method_name = "bilateral ADMM + valley filling" if use_valley else "bilateral ADMM (no valley fill)"
+    method_name = "bilateral ADMM + peak reduction" if use_valley else "bilateral ADMM"
     return {
         "method": method_name,
         "operating_cost_gbp_per_day": cost,
         "peak_grid_import_kw": _grid_peak(grid),
         "peak_grid_import_hour": _grid_peak_hour(grid),
         "grid_import_kwh_per_day": _grid_import_total(grid),
+        "gas_import_kwh_per_day": _gas_import_total(gas),
         "grid_saving_kwh_per_day": _grid_import_total(baseline["grid"]) - _grid_import_total(grid),
         "thermal_comfort_rms_degC": _rms_comfort(t_in),
         "thermal_comfort_max_deviation_degC": _max_temperature_deviation(t_in),
@@ -429,6 +450,7 @@ def _run_bilateral_admm_variant(use_valley: bool) -> dict:
         "community_energy_balance_error_kwh_per_day": abs(net),
         "_grid_series": grid.sum(axis=0),
         "_grid_per_building": np.asarray(grid, dtype=float),
+        "_gas_import_hourly_per_building": np.asarray(gas, dtype=float),
         "_energy_cost_per_building": _building_energy_cost(grid, gas),
         "_temperature_per_building": np.asarray(t_in, dtype=float),
         "_grid_baseline_total": _grid_import_total(baseline["grid"]),
@@ -439,18 +461,18 @@ def _run_bilateral_admm_variant(use_valley: bool) -> dict:
         "_charge_per_building": np.asarray(charge, dtype=float),
         "_discharge_per_building": np.asarray(discharge, dtype=float),
         "note": (
-            "bilateral pairwise P2P sharing" if use_valley else "bilateral pairwise P2P sharing without valley filling"
+            "bilateral pairwise P2P sharing with peak reduction" if use_valley else "bilateral pairwise P2P sharing"
         ),
     }
 
 
 def run_bilateral_admm() -> dict:
-    """Default bilateral ADMM run used in the comparison plots and summary table."""
+    """Run bilateral ADMM with price-shaped peak reduction enabled."""
     return _run_bilateral_admm_variant(use_valley=True)
 
 
 def run_bilateral_admm_variant(use_valley: bool) -> dict:
-    """Public helper for the valley-filling comparison in the main comparison script."""
+    """Run either standard bilateral ADMM or its peak-reduction variant."""
     return _run_bilateral_admm_variant(use_valley=use_valley)
 
 
@@ -473,6 +495,7 @@ def build_building_comparison_table(results: list[dict]) -> pd.DataFrame:
     baseline = next(result for result in results if result["method"] == "centralised no-sharing")
     baseline_cost = np.asarray(baseline["_energy_cost_per_building"], dtype=float)
     baseline_grid = np.asarray(baseline["_grid_per_building"], dtype=float).sum(axis=1) * C.dt
+    baseline_gas = np.asarray(baseline["_gas_import_hourly_per_building"], dtype=float).sum(axis=1) * C.dt
     pv_present = np.any(np.asarray(C.PV_B, dtype=float) > 1e-6, axis=1)
     battery_capacity = np.asarray(C.CAP, dtype=float)
     has_battery = np.asarray(C.HAS_BATTERY, dtype=bool)
@@ -481,6 +504,7 @@ def build_building_comparison_table(results: list[dict]) -> pd.DataFrame:
     for result in results:
         method_cost = np.asarray(result["_energy_cost_per_building"], dtype=float)
         method_grid = np.asarray(result["_grid_per_building"], dtype=float).sum(axis=1) * C.dt
+        method_gas = np.asarray(result["_gas_import_hourly_per_building"], dtype=float).sum(axis=1) * C.dt
         cost_saving = baseline_cost - method_cost
         saving_pct = np.divide(
             100.0 * cost_saving,
@@ -511,6 +535,9 @@ def build_building_comparison_table(results: list[dict]) -> pd.DataFrame:
                     "grid_import_kwh_per_day": method_grid[building],
                     "baseline_grid_import_kwh_per_day": baseline_grid[building],
                     "grid_import_saving_kwh_per_day": baseline_grid[building] - method_grid[building],
+                    "gas_import_kwh_per_day": method_gas[building],
+                    "baseline_gas_import_kwh_per_day": baseline_gas[building],
+                    "gas_import_saving_kwh_per_day": baseline_gas[building] - method_gas[building],
                     "thermal_comfort_rms_degC": float(np.sqrt(np.mean(comfort_error[building] ** 2))),
                     "thermal_comfort_max_deviation_degC": float(np.max(np.abs(comfort_error[building]))),
                     "net_p2p_received_kwh_per_day": float(np.maximum(signed_net[building], 0.0).sum() * C.dt),
@@ -644,6 +671,7 @@ def plot_comparison(table: pd.DataFrame, output: Path = PLOT_FILE) -> None:
         ("peak_grid_import_kw", "Peak grid import (kW)"),
         ("peak_grid_import_hour", "Time of peak grid import (hour)"),
         ("grid_import_kwh_per_day", "Total grid import (kWh/day)"),
+        ("gas_import_kwh_per_day", "Total gas import (kWh/day)"),
         ("grid_saving_kwh_per_day", "Grid saving vs no sharing (kWh/day)"),
         ("thermal_comfort_rms_degC", "Thermal comfort RMS error (deg C)"),
         ("thermal_comfort_max_deviation_degC", "Maximum temperature deviation (deg C)"),
@@ -732,34 +760,107 @@ def plot_comparison(table: pd.DataFrame, output: Path = PLOT_FILE) -> None:
             height=1100,
             barmode="group",
             title=f"{title}<br><sup>{configuration}</sup>",
-            legend=dict(orientation="h", y=-0.08),
+            legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top", font=dict(size=10)),
+            margin=dict(r=230),
         )
         interactive.write_html(html_output, include_plotlyjs=True)
     plt.close(fig)
     print(f"Saved {html_output}")
 
 
-def plot_sharing_surplus_comparison(results: list[dict], output: Path = SURPLUS_PLOT_FILE) -> None:
-    """Compare available surplus and net energy received for every method."""
-    hours = np.arange(C.time_horizon)
-    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
+def plot_bilateral_admm_variant_comparison(table: pd.DataFrame, output: Path = BILATERAL_VALLEY_PLOT_FILE) -> None:
+    """Compare bilateral ADMM with and without valley-filling peak reduction."""
+    display_names = {
+        "bilateral ADMM": "Bilateral ADMM\n(no valley filling)",
+        "bilateral ADMM + peak reduction": "Bilateral ADMM\n(+ valley filling)",
+    }
+    variants = table.loc[table["method"].isin(display_names)].copy()
+    if set(variants["method"]) != set(display_names):
+        print("Skipped bilateral ADMM valley-filling plot: both variants are not present.")
+        return
 
-    for result in results:
-        colour = METHOD_COLORS.get(result["method"], "#777777")
-        axes[0].step(hours, result["_available_surplus"], where="post", color=colour, lw=2, label=result["method"])
-        axes[1].step(
+    metrics = [
+        ("operating_cost_gbp_per_day", "Operating cost (GBP/day)"),
+        ("peak_grid_import_kw", "Peak grid import (kW)"),
+        ("grid_import_kwh_per_day", "Total grid import (kWh/day)"),
+        ("gas_import_kwh_per_day", "Gas import (kWh/day)"),
+        ("net_energy_received_kwh_per_day", "Net energy received (kWh/day)"),
+    ]
+    order = list(display_names)
+    labels = [display_names[method] for method in order]
+    colors = [METHOD_COLORS[method] for method in order]
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12), squeeze=False)
+
+    for axis, (column, title) in zip(axes.ravel(), metrics):
+        values = [float(variants.loc[variants["method"] == method, column].iloc[0]) for method in order]
+        bars = axis.bar(labels, values, color=colors, width=0.62)
+        axis.set_title(title, loc="left", fontsize=11, fontweight="bold")
+        axis.grid(True, axis="y", color="#e6e6e6", linewidth=0.8)
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.tick_params(axis="x", labelsize=9)
+        axis.set_ylim(bottom=min(0.0, min(values) * 1.08))
+        for bar, value in zip(bars, values):
+            axis.annotate(
+                f"{value:.2f}",
+                (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                xytext=(0, 4),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8.5,
+            )
+
+    axes.ravel()[-1].set_visible(False)
+    fig.suptitle(
+        f"{pd.Timestamp(C.SHOWCASE_DAY):%A %d %b %Y} - bilateral ADMM valley-filling comparison\n"
+        f"{_building_configuration_summary()}",
+        x=0.06,
+        ha="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=160, bbox_inches="tight")
+    fig.savefig(output.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {output}")
+    print(f"Saved {output.with_suffix('.pdf')}")
+
+
+def plot_sharing_surplus_comparison(results: list[dict], output: Path = SURPLUS_PLOT_FILE) -> None:
+    """Show available and actually shared energy together for each method."""
+    results = [result for result in results if "_available_surplus" in result and "_shared_per_building" in result]
+    if not results:
+        return
+
+    hours = np.arange(C.time_horizon)
+    ncols = 2 if len(results) > 1 else 1
+    nrows = int(np.ceil(len(results) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3.1 * nrows), sharex=True, sharey=True, squeeze=False)
+    flat_axes = axes.ravel()
+    handles = []
+
+    for axis, result in zip(flat_axes, results):
+        available = np.asarray(result["_available_surplus"], dtype=float)
+        actually_shared = _net_shared_per_hour(result["_shared_per_building"])
+        available_line = axis.step(
+            hours, available, where="post", color="#3b6bb0", lw=2, label="Available energy (PV + battery)"
+        )[0]
+        shared_line = axis.step(
             hours,
-            _net_shared_per_hour(result["_shared_per_building"]),
+            actually_shared,
             where="post",
-            color=colour,
+            color="#c0392b",
             lw=2,
-            label=result["method"],
-        )
-    axes[0].set_title("Export-capable energy (PV + battery)", loc="left", fontsize=11, fontweight="bold")
-    axes[1].set_title("Net energy received", loc="left", fontsize=11, fontweight="bold")
-    axes[1].set_xlabel("Hour of day")
-    for axis in axes:
-        axis.set_ylabel("Energy per hour (kWh)")
+            ls="--",
+            label="Actually shared (net received)",
+        )[0]
+        if not handles:
+            handles = [available_line, shared_line]
+        axis.set_title(result["method"], loc="left", fontsize=10, fontweight="bold")
         axis.set_ylim(bottom=0)
         axis.set_xlim(0, C.time_horizon)
         axis.set_xticks(range(0, C.time_horizon + 1, 3))
@@ -767,16 +868,30 @@ def plot_sharing_surplus_comparison(results: list[dict], output: Path = SURPLUS_
         axis.set_axisbelow(True)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
-        axis.legend(frameon=False, ncol=4, loc="upper left")
+    for axis in flat_axes[len(results) :]:
+        axis.set_visible(False)
+
+    for axis in flat_axes[: len(results)]:
+        axis.set_xlabel("Hour of day")
+        axis.set_ylabel("Power (kW)")
 
     fig.suptitle(
-        f"{pd.Timestamp(C.SHOWCASE_DAY):%A %d %b %Y} - available surplus versus net energy received",
+        f"{pd.Timestamp(C.SHOWCASE_DAY):%A %d %b %Y} - available energy versus actually shared",
         x=0.08,
         ha="left",
         fontsize=14,
         fontweight="bold",
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.legend(
+        handles,
+        [handle.get_label() for handle in handles],
+        frameon=False,
+        ncol=1,
+        loc="center left",
+        bbox_to_anchor=(0.84, 0.5),
+        fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0, 0.82, 0.92))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output), dpi=160)
     plt.close(fig)
@@ -788,43 +903,43 @@ def plot_sharing_surplus_comparison(results: list[dict], output: Path = SURPLUS_
     except ImportError:
         return
     interactive = make_subplots(
-        rows=2,
-        cols=1,
+        rows=nrows,
+        cols=ncols,
         shared_xaxes=True,
-        subplot_titles=("Export-capable energy (PV + battery)", "Net energy received"),
+        shared_yaxes=True,
+        subplot_titles=[result["method"] for result in results],
     )
     html_hours = list(hours) + [C.time_horizon]
-    for result in results:
-        colour = METHOD_COLORS.get(result["method"], "#777777")
-        for row, key, name in (
-            (1, "_available_surplus", "available surplus"),
-            (2, "_shared_per_building", "net energy received"),
+    for index, result in enumerate(results):
+        row, col = divmod(index, ncols)
+        available = list(np.asarray(result["_available_surplus"], dtype=float))
+        actually_shared = list(_net_shared_per_hour(result["_shared_per_building"]))
+        for values, name, colour, dash in (
+            (available, "Available energy (PV + battery)", "#3b6bb0", "solid"),
+            (actually_shared, "Actually shared (net received)", "#c0392b", "dash"),
         ):
-            values = (
-                list(_net_shared_per_hour(result[key])) if row == 2 else list(np.asarray(result[key], dtype=float))
-            )
             interactive.add_trace(
                 go.Scatter(
                     x=html_hours,
                     y=values + [values[-1]],
-                    name=result["method"],
-                    legendgroup=result["method"],
-                    showlegend=(row == 1),
-                    line=dict(color=colour, width=2.2, shape="hv"),
-                    hovertemplate=f"{result['method']} {name}: %{{y:.2f}} kWh<extra></extra>",
+                    name=name,
+                    showlegend=(index == 0),
+                    line=dict(color=colour, width=2.2, dash=dash, shape="hv"),
+                    hovertemplate=f"{result['method']}<br>{name}: %{{y:.2f}} kW<extra></extra>",
                 ),
-                row=row,
-                col=1,
+                row=row + 1,
+                col=col + 1,
             )
     interactive.update_layout(
         template="plotly_white",
-        height=720,
+        height=max(450, 300 * nrows),
         hovermode="x unified",
-        title=f"{C.SHOWCASE_DAY} - sharing surplus versus actual sharing",
-        legend=dict(orientation="h", y=-0.12),
+        title=f"{C.SHOWCASE_DAY} - available energy versus actually shared",
+        legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top", font=dict(size=10)),
+        margin=dict(r=250, t=90),
     )
-    interactive.update_xaxes(title_text="Hour of day", dtick=3, row=2, col=1)
-    interactive.update_yaxes(title_text="kWh per hour", rangemode="tozero")
+    interactive.update_xaxes(title_text="Hour of day", dtick=3)
+    interactive.update_yaxes(title_text="Power (kW)", rangemode="tozero")
     html_output = output.with_suffix(".html")
     interactive.write_html(html_output, include_plotlyjs=True)
     print(f"Saved {html_output}")
@@ -837,12 +952,12 @@ def plot_actual_shared_comparison(results: list[dict], output: Path = DESTINATIO
         "rule-based",
         "central",
         "exchange-ADMM",
-        "bilateral ADMM (no valley fill)",
-        "bilateral ADMM + valley filling",
+        "bilateral ADMM",
+        "bilateral ADMM + peak reduction",
     }
     results = [result for result in results if result["method"] in selected]
     hours = np.arange(C.time_horizon)
-    fig, ax = plt.subplots(figsize=(13, 5.5))
+    fig, ax = plt.subplots(figsize=(15, 5.5))
     grid_ax = ax.twinx()
 
     tariff_bands = (
@@ -886,7 +1001,14 @@ def plot_actual_shared_comparison(results: list[dict], output: Path = DESTINATIO
     ax.set_axisbelow(True)
     handles, labels = ax.get_legend_handles_labels()
     grid_handles, grid_labels = grid_ax.get_legend_handles_labels()
-    ax.legend(handles + grid_handles, labels + grid_labels, frameon=False, ncol=4, loc="upper left")
+    ax.legend(
+        handles + grid_handles,
+        labels + grid_labels,
+        frameon=False,
+        loc="center left",
+        bbox_to_anchor=(1.14, 0.5),
+        fontsize=8,
+    )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     grid_ax.spines["top"].set_visible(False)
@@ -897,7 +1019,7 @@ def plot_actual_shared_comparison(results: list[dict], output: Path = DESTINATIO
         fontsize=14,
         fontweight="bold",
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 0.78, 0.95))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output), dpi=160)
     plt.close(fig)
@@ -945,13 +1067,14 @@ def plot_actual_shared_comparison(results: list[dict], output: Path = DESTINATIO
             )
     interactive.update_layout(
         template="plotly_white",
-        height=500,
+        height=560,
         hovermode="x unified",
         title=f"{C.SHOWCASE_DAY} - net energy received and grid import comparison",
         xaxis_title="Hour of day",
         yaxis_title="Net energy received per hour (kWh)",
         yaxis2=dict(title="Community grid import (kW)", overlaying="y", side="right", rangemode="tozero"),
-        legend=dict(orientation="h", y=-0.18),
+        legend=dict(orientation="v", x=1.24, xanchor="left", y=1, yanchor="top", font=dict(size=9)),
+        margin=dict(r=300, b=60),
     )
     interactive.update_xaxes(dtick=3)
     interactive.update_yaxes(rangemode="tozero")
@@ -967,11 +1090,11 @@ def plot_shared_energy_vs_grid_saving(results: list[dict], output: Path = GRID_S
         "rule-based",
         "central",
         "exchange-ADMM",
-        "bilateral ADMM (no valley fill)",
-        "bilateral ADMM + valley filling",
+        "bilateral ADMM",
+        "bilateral ADMM + peak reduction",
     }
     results = [result for result in results if result["method"] in selected]
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(11, 6))
     for result in results:
         colour = METHOD_COLORS.get(result["method"], "#777777")
         ax.scatter(
@@ -982,27 +1105,144 @@ def plot_shared_energy_vs_grid_saving(results: list[dict], output: Path = GRID_S
             label=result["method"],
             zorder=3,
         )
-        ax.annotate(
-            result["method"],
-            (result["net_energy_received_kwh_per_day"], result["_grid_saving_total"]),
-            xytext=(7, 5),
-            textcoords="offset points",
-            fontsize=9,
-        )
     ax.axhline(0, color="#888888", lw=0.8)
     ax.set_xlabel("Net energy received (kWh/day)")
     ax.set_ylabel("Grid-import saving vs no-sharing baseline (kWh/day)")
     ax.set_title("Shared energy versus actual grid saving", loc="left", fontsize=12, fontweight="bold")
     ax.grid(True, color="#e6e6e6", lw=0.8)
     ax.set_axisbelow(True)
-    ax.legend(frameon=False, ncol=2)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    fig.tight_layout()
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=9)
+    fig.tight_layout(rect=(0, 0, 0.74, 1))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output), dpi=160)
     plt.close(fig)
     print(f"Saved {output}")
+
+
+def plot_shared_energy_vs_cost_saving(results: list[dict], output: Path = COST_SAVING_PLOT_FILE) -> None:
+    """Plot net P2P energy received against energy-cost savings vs no sharing."""
+    selected = {
+        "centralised no-sharing",
+        "rule-based",
+        "central",
+        "exchange-ADMM",
+        "bilateral ADMM",
+        "bilateral ADMM + peak reduction",
+    }
+    results = [result for result in results if result["method"] in selected]
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for result in results:
+        colour = METHOD_COLORS.get(result["method"], "#777777")
+        savings = float(result["energy_cost_saving_gbp_per_day"])
+        shared = float(result["net_energy_received_kwh_per_day"])
+        ax.scatter(shared, savings, s=130, color=colour, label=result["method"], zorder=3)
+    ax.axhline(0, color="#888888", lw=0.8)
+    ax.set_xlabel("Net energy received (kWh/day)")
+    ax.set_ylabel("Energy-cost saving vs no-sharing baseline (£/day)")
+    ax.set_title("Shared energy versus energy-cost saving", loc="left", fontsize=12, fontweight="bold")
+    ax.grid(True, color="#e6e6e6", lw=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.02, 0.5))
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout(rect=(0, 0, 0.74, 1))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output), dpi=160)
+    plt.close(fig)
+    print(f"Saved {output}")
+
+
+def _comparison_cache_signature(no_admm: bool) -> str:
+    """Hash the inputs, solver settings, and model sources that define cached results."""
+    digest = hashlib.sha256()
+    for array in (C.LOAD, C.PV_B, C.PRICE, C.T_OUT, C.T_SET, C.CAP, C.MAXPOW, C.INIT_SOC, C.INIT_T_IN):
+        values = np.ascontiguousarray(array)
+        digest.update(str(values.shape).encode("ascii"))
+        digest.update(values.tobytes())
+    settings = {
+        "schema": 1,
+        "showcase_day": str(C.SHOWCASE_DAY),
+        "building_ids": [str(value) for value in C.BUILDING_IDS],
+        "assets": [str(value) for value in C.ASSETS],
+        "dt": float(C.dt),
+        "gas_price": float(C.gas_price),
+        "alpha": float(C.alpha),
+        "no_admm": no_admm,
+        "bilateral": {
+            name: getattr(BIL, name)
+            for name in ("RHO", "MAX_ITERS", "EPS_PRIMAL", "EPS_DUAL", "STOP_STREAK", "RELAX_BINARIES")
+        },
+        "model_source_hashes": {},
+    }
+    for source in (Path(BIL.__file__), Path(EXC.__file__), Path(C.__file__)):
+        settings["model_source_hashes"][source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    digest.update(json.dumps(settings, sort_keys=True, default=str).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _write_results_cache(path: Path, signature: str, rows: list[dict]) -> None:
+    """Persist the solved result arrays and metrics for plot regeneration/reload."""
+    serialised_rows = []
+    for row in rows:
+        serialised_rows.append(
+            {
+                key: (
+                    value.tolist()
+                    if isinstance(value, np.ndarray)
+                    else value.item() if isinstance(value, np.generic) else value
+                )
+                for key, value in row.items()
+            }
+        )
+    payload = {"schema": 1, "signature": signature, "results": serialised_rows}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    print(f"Saved solved comparison results to {path}")
+
+
+def _read_results_cache(path: Path, signature: str, no_admm: bool = False) -> list[dict]:
+    """Load solved outputs, validating structure even when the cache is legacy."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != 1 or not isinstance(payload.get("results"), list):
+        raise ValueError(f"Cache {path} has an unsupported format or no results.")
+
+    expected_methods = ["centralised no-sharing", "rule-based", "central"]
+    if not no_admm:
+        expected_methods.extend(["exchange-ADMM", "bilateral ADMM", "bilateral ADMM + peak reduction"])
+    cached_methods = [row.get("method") for row in payload["results"]]
+    if cached_methods != expected_methods:
+        raise ValueError(
+            f"Cache {path} contains methods {cached_methods}, expected {expected_methods}. "
+            "Select the matching --no-admm option or create a fresh cache."
+        )
+
+    rows = []
+    for row in payload["results"]:
+        restored = {
+            key: np.asarray(value) if key.startswith("_") and isinstance(value, list) else value
+            for key, value in row.items()
+        }
+        expected_shapes = {
+            "_grid_per_building": (C.n_buildings, C.time_horizon),
+            "_gas_import_hourly_per_building": (C.n_buildings, C.time_horizon),
+            "_shared_per_building": (C.n_buildings, C.time_horizon),
+            "_temperature_per_building": (C.n_buildings, C.time_horizon),
+            "_energy_cost_per_building": (C.n_buildings,),
+            "_available_surplus": (C.time_horizon,),
+        }
+        for key, shape in expected_shapes.items():
+            if key not in restored or np.asarray(restored[key]).shape != shape:
+                actual = np.asarray(restored[key]).shape if key in restored else "missing"
+                raise ValueError(f"Cache {path} has invalid {key} for {row['method']}: {actual}, expected {shape}.")
+        rows.append(restored)
+
+    if payload.get("signature") != signature:
+        print("Cache signature differs; reusing the explicitly requested saved results after structural validation.")
+        _write_results_cache(path, signature, rows)
+    print(f"Loaded solved comparison results from {path}")
+    return rows
 
 
 def _plot_building_heatmap(
@@ -1086,6 +1326,18 @@ def plot_building_grid_heatmap(results: list[dict], output: Path = HEATMAP_PLOT_
     )
 
 
+def plot_building_gas_heatmap(results: list[dict], output: Path = GAS_HEATMAP_PLOT_FILE) -> None:
+    """Per-building hourly gas import heatmap, with one panel per method."""
+    _plot_building_heatmap(
+        results,
+        "_gas_import_hourly_per_building",
+        output,
+        cbar_label="Hourly Gas Import [kW]",
+        suptitle_suffix="gas import by building and method",
+        cmap="YlOrBr",
+    )
+
+
 def plot_building_shared_heatmap(results: list[dict], output: Path = SHARED_HEATMAP_PLOT_FILE) -> None:
     """Per-building net P2P shared-energy heatmap, one column per method.
 
@@ -1120,7 +1372,7 @@ def plot_building_energy_timeseries(result: dict, output: Path) -> None:
     shared = result.get("_shared_per_building", np.zeros((n_buildings, C.time_horizon)))
     soc = _battery_soc(result["_charge_per_building"], result["_discharge_per_building"], C.CAP, C.INIT_SOC)
 
-    fig, axes = plt.subplots(n_buildings, 1, figsize=(11, 2.3 * n_buildings), sharex=True)
+    fig, axes = plt.subplots(n_buildings, 1, figsize=(14, 2.3 * n_buildings), sharex=True)
     axes = np.atleast_1d(axes)
 
     series_style = [
@@ -1138,7 +1390,18 @@ def plot_building_energy_timeseries(result: dict, output: Path) -> None:
         soc_ax.set_ylabel("SOC [kWh]", fontsize=8)
         soc_ax.set_ylim(bottom=0)
 
-        axis.set_title(f"Building {b + 1}", loc="left", fontsize=10, fontweight="bold")
+        asset_details = [str(C.ASSETS[b])]
+        if C.CAP[b] > 1e-9:
+            asset_details.append(f"battery {C.CAP[b]:.1f} kWh")
+        pv_peak = float(np.max(pv[b]))
+        if pv_peak > 1e-6:
+            asset_details.append(f"PV peak {pv_peak:.1f} kW")
+        axis.set_title(
+            f"Building {b + 1} | {C.BUILDING_IDS[b]}\n{' | '.join(asset_details)}",
+            loc="left",
+            fontsize=9,
+            fontweight="bold",
+        )
         axis.set_ylabel("Power [kW]", fontsize=8)
         axis.grid(True, axis="y", color="#e6e6e6", linewidth=0.7)
         axis.set_axisbelow(True)
@@ -1147,13 +1410,13 @@ def plot_building_energy_timeseries(result: dict, output: Path) -> None:
         if b == 0:
             handles, labels = axis.get_legend_handles_labels()
             soc_handles, soc_labels = soc_ax.get_legend_handles_labels()
-            axis.legend(
+            fig.legend(
                 handles + soc_handles,
                 labels + soc_labels,
                 frameon=False,
-                ncol=5,
-                loc="upper left",
-                bbox_to_anchor=(0, 1.35),
+                ncol=1,
+                loc="center left",
+                bbox_to_anchor=(0.83, 0.5),
                 fontsize=8,
             )
 
@@ -1169,7 +1432,7 @@ def plot_building_energy_timeseries(result: dict, output: Path) -> None:
         fontweight="bold",
         y=0.995,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout(rect=(0, 0, 0.80, 0.96))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output), dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1180,12 +1443,39 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-admm", action="store_true", help="skip both ADMM runs")
     parser.add_argument("--output", type=Path, default=OUTPUT_FILE)
+    parser.add_argument(
+        "--cache-file", type=Path, default=CACHE_FILE, help="file used to save/load solved comparison results"
+    )
+    parser.add_argument(
+        "--load-cache", action="store_true", help="reload matching solved results and skip optimisation"
+    )
     args = parser.parse_args()
 
-    C._require_solver()
-    rows = [run_no_sharing(), run_rule_based(), run_central()]
-    if not args.no_admm:
-        rows.extend([run_exchange_admm(), run_bilateral_admm_variant(False), run_bilateral_admm()])
+    signature = _comparison_cache_signature(args.no_admm)
+    if args.load_cache:
+        if not args.cache_file.is_file():
+            raise FileNotFoundError(f"No saved comparison results at {args.cache_file}")
+        rows = _read_results_cache(args.cache_file, signature, no_admm=args.no_admm)
+    else:
+        C._require_solver()
+        rows = [run_no_sharing(), run_rule_based(), run_central()]
+        if not args.no_admm:
+            rows.extend([run_exchange_admm(), run_bilateral_admm_variant(False), run_bilateral_admm()])
+        baseline = next(row for row in rows if row["method"] == "centralised no-sharing")
+        baseline_cost = float(np.asarray(baseline["_energy_cost_per_building"], dtype=float).sum())
+        for row in rows:
+            row["energy_cost_saving_gbp_per_day"] = baseline_cost - float(
+                np.asarray(row["_energy_cost_per_building"], dtype=float).sum()
+            )
+        _write_results_cache(args.cache_file, signature, rows)
+
+    if any("energy_cost_saving_gbp_per_day" not in row for row in rows):
+        baseline = next(row for row in rows if row["method"] == "centralised no-sharing")
+        baseline_cost = float(np.asarray(baseline["_energy_cost_per_building"], dtype=float).sum())
+        for row in rows:
+            row["energy_cost_saving_gbp_per_day"] = baseline_cost - float(
+                np.asarray(row["_energy_cost_per_building"], dtype=float).sum()
+            )
 
     table = pd.DataFrame([{k: v for k, v in row.items() if not k.startswith("_")} for row in rows])
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1198,10 +1488,13 @@ def main() -> None:
     plot_building_cost_savings(building_table, building_savings_plot)
     plot_building_cost_comparison(building_table, args.output.with_name(BUILDING_COST_BARS_FILE.name))
     plot_comparison(table, args.output.with_suffix(".png"))
+    plot_bilateral_admm_variant_comparison(table, args.output.with_name(BILATERAL_VALLEY_PLOT_FILE.name))
     plot_sharing_surplus_comparison(rows, args.output.with_name("22_sharing_surplus_comparison.png"))
     plot_actual_shared_comparison(rows, args.output.with_name("25_sharing_destinations_comparison.png"))
     plot_shared_energy_vs_grid_saving(rows, args.output.with_name("26_shared_energy_vs_grid_saving.png"))
+    plot_shared_energy_vs_cost_saving(rows, args.output.with_name(COST_SAVING_PLOT_FILE.name))
     plot_building_grid_heatmap(rows, args.output.with_name("23_building_grid_import_heatmap.png"))
+    plot_building_gas_heatmap(rows, args.output.with_name(GAS_HEATMAP_PLOT_FILE.name))
     plot_building_shared_heatmap(rows, args.output.with_name("24_building_shared_energy_heatmap.png"))
     for row in rows:
         slug = row["method"].lower().replace(" ", "_")

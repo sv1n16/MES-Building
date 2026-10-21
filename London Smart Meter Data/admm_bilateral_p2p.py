@@ -55,15 +55,15 @@ import central_optimisation_showcase as C
 from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
-RHO = 1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
+RHO = 1.1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
 #           iterations-to-converge bottoms at ρ≈8–16 (8 iters vs 19 at ρ=1), and ρ≥16
 #           also best matches central's minimal-routing solution (per-building cost RMS
 #           5.0% vs 7.5% mid-range; traded volume 8.6 vs 15.6 kWh). Identical result with
 #           RELAX_BINARIES True or False (the charge/discharge binary is slack on the
 #           showcase day). Re-sweep if N changes.
 MAX_ITERS = 1000
-EPS_PRIMAL = 1e-6  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
-EPS_DUAL = 1e-6  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
+EPS_PRIMAL = 1e-5  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
+EPS_DUAL = 1e-5  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
 ADAPT_RHO = False  # residual balancing (Boyd §3.4.1)
 STOP_STREAK = 2  # need this many consecutive iters below tol
 RELAX_BINARIES = True  # False -> exact Binary charge/discharge indicator (MIQP subproblems,

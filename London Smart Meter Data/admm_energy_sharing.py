@@ -38,8 +38,8 @@ from plot_timeseries import INK, MUTED
 # ---------------------------------------------------------------- ADMM settings
 RHO = 1  # penalty parameter (£ / kW^2)
 MAX_ITERS = 1000
-EPS_PRIMAL = 1e-7  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
-EPS_DUAL = 1e-7  # kW   – scaled change in the consensus average
+EPS_PRIMAL = 1e-5  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
+EPS_DUAL = 1e-5  # kW   – scaled change in the consensus average
 RELAX_BINARIES = True  # False -> exact Binary charge/discharge indicator (MIQP subproblems,
 #                         matching central_optimisation_showcase); non-convex ADMM, convergence
 #                         no longer guaranteed. True -> relax cs to [0,1]: convex QP, provable.
