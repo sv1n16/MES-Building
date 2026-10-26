@@ -27,7 +27,7 @@ def _tou_daily() -> pd.DataFrame:
     data["kWh"] = pd.to_numeric(data["KWH/hh (per half hour)"], errors="coerce")
     return data.dropna(subset=["DateTime", "kWh"])[["LCLid", "DateTime", "kWh"]]
 
-PLOTS_DIR = Path(__file__).parent / "plots"
+PLOTS_DIR = Path(__file__).parent / "Results"
 PLOTS_DIR.mkdir(exist_ok=True)
 
 INK = "#1a1a1a"

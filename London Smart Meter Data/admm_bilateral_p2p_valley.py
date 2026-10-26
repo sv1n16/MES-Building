@@ -47,6 +47,8 @@ centralised market solution.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pyomo.environ as pyo
 import matplotlib.pyplot as plt
@@ -55,12 +57,7 @@ import central_optimisation_showcase as C
 from plot_timeseries import INK, MUTED
 
 # ---------------------------------------------------------------- ADMM settings
-RHO = 1.1  # tuned at N=10 (ρ sweep 0.1–32, scratchpad/bilateral_rho_sweep*.py):
-#           iterations-to-converge bottoms at ρ≈8–16 (8 iters vs 19 at ρ=1), and ρ≥16
-#           also best matches central's minimal-routing solution (per-building cost RMS
-#           5.0% vs 7.5% mid-range; traded volume 8.6 vs 15.6 kWh). Identical result with
-#           RELAX_BINARIES True or False (the charge/discharge binary is slack on the
-#           showcase day). Re-sweep if N changes.
+RHO = 1.1  
 MAX_ITERS = 1000
 EPS_PRIMAL = 1e-5  # eq (36) ε₁ as an RMS consensus violation (kW); ‖Δλ‖² ≤ (ρ·EPS_PRIMAL)²·N(N-1)T
 EPS_DUAL = 1e-5  # eq (36) ε₂ as an RMS change in the agreed trades (kW); ρ‖Δz‖² ≤ ρ·EPS_DUAL²·|PAIRS|·T
@@ -85,6 +82,7 @@ PRICE_MEDIUM_COLOR = "#8b78b5"
 use_congestion = True
 congestion_weight = 0.01 + 0.04 * (C.PRICE - C.PRICE.min()) / (C.PRICE.max() - C.PRICE.min())
 # ingredient for approach 1 -- shapes the MARGINAL cost of importing
+ROLLING_FIRST_INTERVAL = False
 
 
 # ============================================================================
@@ -122,14 +120,19 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
 
     def soc_bal(mm, t):
         if t == 0:
+            if ROLLING_FIRST_INTERVAL:
+                return mm.soc[t] == float(C.INIT_SOC[b]) + (
+                    C.eta_charge * mm.charge[t]
+                    - (1.0 / C.eta_discharge) * mm.discharge[t]
+                ) * DT
             return mm.soc[t] == float(C.INIT_SOC[b])
         return (
             mm.soc[t] == mm.soc[t - 1] + (C.eta_charge * mm.charge[t] - (1.0 / C.eta_discharge) * mm.discharge[t]) * DT
         )
 
     m.c_soc = pyo.Constraint(m.t, rule=soc_bal)
-    m.c_nc0 = pyo.Constraint(rule=lambda mm: mm.charge[0] == 0)
-    m.c_nd0 = pyo.Constraint(rule=lambda mm: mm.discharge[0] == 0)
+    m.c_nc0 = pyo.Constraint(rule=lambda mm: pyo.Constraint.Skip if ROLLING_FIRST_INTERVAL else mm.charge[0] == 0)
+    m.c_nd0 = pyo.Constraint(rule=lambda mm: pyo.Constraint.Skip if ROLLING_FIRST_INTERVAL else mm.discharge[0] == 0)
     if not HAS_BATTERY[b]:
         for t in range(T):
             m.charge[t].fix(0.0)
@@ -145,6 +148,12 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
 
     def thermal(mm, t):
         if t == 0:
+            if ROLLING_FIRST_INTERVAL:
+                initial_temperature = float(C.INIT_T_IN[b])
+                heat_output = C.p_th_nom * mm.f[t] + mm.q_boiler[t]
+                return mm.T_in[t] == initial_temperature + DT / 10 * (
+                    heat_output - 0.5 * (initial_temperature - C.T_OUT[t])
+                )
             return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
@@ -237,7 +246,13 @@ def _zloc_from_Z(Z: dict) -> list[np.ndarray]:
 # ============================================================================
 # ADMM LOOP
 # ============================================================================
-def run_admm():
+def run_admm(init_lam=None, init_Z=None, solve_log=None, verbose=True):
+    """Run bilateral ADMM.
+
+    init_lam / init_Z warm-start the duals and agreed trades (shapes as returned
+    by a previous call, trimmed to the current T). solve_log, if given, receives
+    one (iteration, building, seconds) tuple per subproblem solve.
+    """
     C._require_solver()
     solver = pyo.SolverFactory(C.SOLVER)
     _opts = [("LogFile", ""), ("OutputFlag", 0)]
@@ -254,6 +269,11 @@ def run_admm():
     lam_all = [np.zeros((N - 1, T)) for _ in range(N)]
     Z = {p: np.zeros(T) for p in PAIRS}
     zloc_all = [np.zeros((N - 1, T)) for _ in range(N)]
+    if init_lam is not None:
+        lam_all = [np.array(lam, dtype=float).copy() for lam in init_lam]
+    if init_Z is not None:
+        Z = {p: np.array(init_Z[p], dtype=float).copy() for p in PAIRS}
+        zloc_all = _zloc_from_Z(Z)
 
     rho = float(RHO)
     streak = 0
@@ -261,7 +281,8 @@ def run_admm():
     npair_t = len(PAIRS) * T
     ncoup_t = N * (N - 1) * T
 
-    print(f"bilateral ADMM  N={N}  pairs={len(PAIRS)}  T={T}  rho={RHO}  " f"relax_binaries={RELAX_BINARIES}")
+    if verbose:
+        print(f"bilateral ADMM  N={N}  pairs={len(PAIRS)}  T={T}  rho={RHO}  " f"relax_binaries={RELAX_BINARIES}")
     for i in range(MAX_ITERS):
         # ---- (32) x-update: each building solves its own subproblem ----
         for b, m in enumerate(subs):
@@ -270,7 +291,10 @@ def run_admm():
                 for t in range(T):
                     m.lam[k, t] = float(lam_all[b][k, t])
                     m.zloc[k, t] = float(zloc_all[b][k, t])
+            solve_started = time.perf_counter()
             res = solver.solve(m, tee=False)
+            if solve_log is not None:
+                solve_log.append((i, b, time.perf_counter() - solve_started))
             tc = res.solver.termination_condition
             if tc not in (pyo.TerminationCondition.optimal, pyo.TerminationCondition.locallyOptimal):
                 raise RuntimeError(
@@ -306,7 +330,7 @@ def run_admm():
         z_norm = float(np.sqrt(sum(float(np.sum(Z_new[p] ** 2)) for p in PAIRS)))
         lambda_norm = float(np.sqrt(sum(float(np.sum(lam_new[b] ** 2)) for b in range(N))))
         hist.append((i, prim, dual, r_rms, s_rms, traded, operating_cost, z_norm, lambda_norm))
-        if i % 10 == 0:
+        if verbose and i % 10 == 0:
             print(
                 f"  iter {i:3d}  primal(RMS) {r_rms:.7f} kW   dual(RMS) {s_rms:.7f}   "
                 f"traded {traded:6.1f} kWh   rho {rho:.1f}"
@@ -326,7 +350,8 @@ def run_admm():
         Z, zloc_all, lam_all = Z_new, zloc_new, lam_new
 
         if streak >= STOP_STREAK:
-            print(f"  converged at iter {i}  (primal {r_rms:.4f}, dual {s_rms:.4f})")
+            if verbose:
+                print(f"  converged at iter {i}  (primal {r_rms:.4f}, dual {s_rms:.4f})")
             break
 
         # ---- residual balancing (Boyd §3.4.1) ----
@@ -336,7 +361,8 @@ def run_admm():
             elif dual > 100.0 * prim:
                 rho *= 0.5
     else:
-        print(f"  stopped at MAX_ITERS ({MAX_ITERS}); r_rms={r_rms:.4f} s_rms={s_rms:.4f}")
+        if verbose:
+            print(f"  stopped at MAX_ITERS ({MAX_ITERS}); r_rms={r_rms:.4f} s_rms={s_rms:.4f}")
 
     return subs, q_all, lam_all, Z, np.array(hist)
 
