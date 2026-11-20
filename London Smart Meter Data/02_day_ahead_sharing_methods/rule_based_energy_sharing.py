@@ -1,5 +1,11 @@
 """Rule-based peer-to-peer energy sharing for the ToU building dataset.
 
+PURPOSE
+    Solver-free baseline: how much does sharing save with simple, auditable rules?
+COMPUTED
+    saving = Σ_b Σ_t π_t (g_b,t^no-share − g_b,t^share) Δt
+    (no objective is optimised; dispatch follows the rules below)
+
 This is a transparent baseline for comparison with the optimisation scripts.
 It uses no solver. Each day starts with the same seeded interior battery state
 as the bilateral ADMM model and follows fixed dispatch rules, then reports the
@@ -13,7 +19,7 @@ Rules, in order, for each half-hour:
       reserve and respecting their maximum discharge rate. Requests are served
       in descending order of unmet demand; ties use building order.
   4. Any demand still unmet is imported from the grid.
-    5. Low-tariff slots do not trigger battery discharge or sharing.
+  5. Low-tariff slots do not trigger battery discharge or sharing.
 
 The rule intentionally favours simple, auditable behaviour over optimality. It
 is useful as a deterministic benchmark for ``sharing_showcase.py`` and the

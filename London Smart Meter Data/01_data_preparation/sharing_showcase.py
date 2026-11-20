@@ -1,5 +1,12 @@
 """Find the 24h window that best showcases battery sharing between buildings.
 
+PURPOSE
+    Pick the day on which battery SHARING is worth the most, using a fast
+    solver-free proxy (price water-filling) instead of the full model.
+RANKED QUANTITY
+    share_benefit(day) = cost_isolated(day) − cost_shared(day) − trade_fee(day)
+    cost_x(day) = Σ_b Σ_t π_t · g_b,t^x · Δt   (electricity only)
+
 Scenario (from the user's optimisation objective):
   * Community = 10 diverse ToU buildings, each with its own battery.
   * Objective is COST: sum_t price[t] * grid_import[b,t] * dt  (+ gas + comfort +

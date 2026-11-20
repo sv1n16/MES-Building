@@ -1,5 +1,36 @@
 """Parallel bilateral ADMM: the building subproblems of each iteration solved at once.
 
+PURPOSE
+    Same answer as the sequential bilateral ADMM, but measured the way it would
+    run in the field: one controller per building, all solving at the same time.
+
+OBJECTIVES BUILT BY _build()   (constraints = building model B_b in every case)
+
+  1. ADMM subproblem (default; = admm_bilateral_p2p_valley.build_subproblem)
+         Σ_t π g Δt + c_gas G Δt + α (T − T_set)² + w_t g²
+       + Σ λ q + ρ/2 Σ (q − z)² + 1e-4 Σ q⁺
+       [+ Σ (γ_bj/2)(q⁺ + q⁻) Δt   exogenous network charge, if admm_bilateral_p2p_valley.NETWORK_CHARGE]
+       [+ Σ (κ_bj/2) π_t q² Δt      quadratic network losses, if admm_bilateral_p2p_valley.NETWORK_LOSSES]
+     (λ q − ρ z q is linear and rewritten in the Obj attribute every iteration.)
+
+  2. + sharing-plan tracking  (EXTRA_DATA["tracking"], minute level of three_timescale.py)
+       mode "trades":  + W Δt Σ_t Σ_j (q_j − q_j^plan)²       (sharing plan)
+       mode "grid":    + W_g Δt Σ_t (g_t − g^plan)² − μ_soc s_end − μ_T T_end
+                       (trades free to re-route; μ = the hourly solve's shadow prices, ParallelADMM.state_values)
+       both:           + W_soc (s_end − s^plan)² + W_T (T_end − T^plan)²
+
+  3. + ramp limits    (tracking["ramp"], 09_ramp_rate_control)
+       grid mode:      E_t = g_t Δt,  r⁺_t ≥ E_t − E_{t−1} − ΔE,  r⁻_t ≥ E_{t−1} − E_t − ΔE
+                       + W_r/Δt Σ (r⁺² + r⁻²)   [and/or  + W_lin Σ (r⁺ + r⁻)]
+       P2P mode (6a)-(6c):
+         producers     E_t = Δt Σ_j q⁺_j, same up/down excess, + W_r/Δt Σ (r⁺² + r⁻²)
+         consumers     E_t = Δt (g + Σ_j q⁻_j),  x_t ≥ Σ_{l≤t} E_l − D_t,  + W_cum Σ x_t²
+
+  4. local re-optimisation  (local={...}, = simulate_realtime_reoptimise)
+         own cost + FEE_FRAC π Δt Σ_j (q⁻_j − q⁺_j)
+       + share_penalty Δt Σ_j (|q_j^plan| − q⁺_j − q⁻_j)
+       with 0 ≤ q⁺_j ≤ max(q_j^plan, 0), 0 ≤ q⁻_j ≤ max(−q_j^plan, 0)
+
 Same algorithm as admm_bilateral_p2p_valley.run_admm (same subproblem, z- and
 lambda-updates, residuals and stopping test), with two speed-ups:
 
@@ -89,14 +120,15 @@ def _build(data, b, env, local=None):
 
     init_soc, init_t = float(data["INIT_SOC"][b]), float(data["INIT_T_IN"][b])
     p_th, t_out, cop = data["p_th_nom"], data["T_OUT"], data["COP"]
+    links = {"soc": [None] * T, "T_in": [None] * T}  # state dynamics t-1 -> t (their duals price the state)
     for t in ts:
         m.addConstr(charge[t] <= maxpow * cs[t])
         m.addConstr(discharge[t] <= maxpow * (1 - cs[t]))
         step = (eta_c * charge[t] - (1.0 / eta_d) * discharge[t]) * DT
         heat = p_th * f[t] + q_boiler[t]
         if t > 0:
-            m.addConstr(soc[t] == soc[t - 1] + step)
-            m.addConstr(T_in[t] == T_in[t - 1] + DT / 10 * (heat - 0.5 * (T_in[t - 1] - t_out[t])))
+            links["soc"][t] = m.addConstr(soc[t] == soc[t - 1] + step)
+            links["T_in"][t] = m.addConstr(T_in[t] == T_in[t - 1] + DT / 10 * (heat - 0.5 * (T_in[t - 1] - t_out[t])))
         elif rolling:
             m.addConstr(soc[0] == init_soc + step)
             m.addConstr(T_in[0] == init_t + DT / 10 * (heat - 0.5 * (init_t - t_out[0])))
@@ -125,6 +157,71 @@ def _build(data, b, env, local=None):
             for k in ks:
                 # lambda q - rho z q is linear in q: written to the Obj attribute before every solve
                 obj += (rho / 2.0) * q[k][t] * q[k][t] + 1e-4 * qpos[k][t]
+                if data.get("NETWORK_CHARGE") is not None:  # half of γ_bj per kWh traded (Baroche et al. 2019)
+                    neighbour = k if k < b else k + 1  # = admm_bilateral_p2p_valley.NB[b][k]
+                    obj += data["NETWORK_CHARGE"][b][neighbour] / 2.0 * DT * (qpos[k][t] + qneg[k][t])
+                if data.get("NETWORK_LOSSES") is not None:  # quadratic per-pair losses at the tariff, half per side
+                    neighbour = k if k < b else k + 1
+                    obj += data["NETWORK_LOSSES"][b][neighbour] / 2.0 * price[t] * DT * q[k][t] * q[k][t]
+    q_offset = np.zeros((K, T))
+    tracking = data.get("tracking")
+    if tracking is not None and local is None:
+        last = T - 1
+        if tracking.get("mode", "trades") == "grid":
+            # grid tracking (three_timescale.py --tracking grid): W_g dt (g - g_plan)^2, trades free to
+            # re-route, and the end-of-horizon state valued at the hourly solve's shadow prices:
+            # - mu_soc s_end - mu_T T_end  (plus the small quadratics below)
+            w_grid, grid_plan = tracking["grid_weight"], float(tracking["p_el"][b])
+            for t in ts:
+                obj += w_grid * DT * (p_el[t] - grid_plan) * (p_el[t] - grid_plan)
+            obj += -float(tracking["soc_value"][b]) * soc[last] - float(tracking["temperature_value"][b]) * T_in[last]
+        else:
+            # sharing-plan tracking (08_minute_resolution/three_timescale.py): quadratic penalty on
+            # departing from the plan's P2P trades, W dt (q - q_plan)^2, and on missing its end-of-horizon state.
+            # The trades' linear part (-2 w dt q_plan) goes with lambda - rho z into the Obj attribute (see _solve).
+            w = tracking["weight"]
+            for t in ts:
+                for k in ks:
+                    obj += w * DT * q[k][t] * q[k][t]
+                    q_offset[k, t] = -2.0 * w * DT * float(tracking["q"][b][k])
+        obj += tracking["soc_weight"] * (soc[last] - float(tracking["soc"][b])) * (soc[last] - float(tracking["soc"][b]))
+        obj += (tracking["temperature_weight"] * (T_in[last] - float(tracking["T_in"][b]))
+                * (T_in[last] - float(tracking["T_in"][b])))
+        ramp = tracking.get("ramp")
+        if ramp is not None and ramp.get("mode") == "grid":
+            # ramp limit on the building's grid import: E = grid energy per step, up/down within delta
+            energy = [DT * p_el[t] for t in ts]
+            previous, delta = float(ramp["previous"][b]), float(ramp["delta"][b])
+            for t in ts:
+                before = energy[t - 1] if t > 0 else previous
+                up, down = m.addVar(lb=0.0), m.addVar(lb=0.0)
+                m.addConstr(up >= energy[t] - before - delta)
+                m.addConstr(down >= before - energy[t] - delta)
+                if ramp.get("quadratic", True):
+                    obj += ramp["ramp_weight"] / DT * (up * up + down * down)
+                if ramp.get("linear_weight", 0.0) > 0:  # proportional (exact) penalty, GBP per kWh of excess
+                    obj += ramp["linear_weight"] * (up + down)
+        elif ramp is not None:
+            # (6a)-(6c) as quadratic penalties on their excess (08_minute_resolution/ramp_limits)
+            if ramp["producer"][b]:
+                # producers: E = energy sold P2P per step; ramp up/down within delta per step
+                energy = [DT * gp.quicksum(qpos[k][t] for k in ks) for t in ts]
+                previous, delta = float(ramp["previous"][b]), float(ramp["delta"][b])
+                for t in ts:
+                    before = energy[t - 1] if t > 0 else previous
+                    up, down = m.addVar(lb=0.0), m.addVar(lb=0.0)
+                    m.addConstr(up >= energy[t] - before - delta)
+                    m.addConstr(down >= before - energy[t] - delta)
+                    obj += ramp["ramp_weight"] / DT * (up * up + down * down)  # = w DT (excess / DT)^2
+            else:
+                # consumers: E = energy bought (grid + P2P) per step; cumulative within the cap
+                energy = [DT * (p_el[t] + gp.quicksum(qneg[k][t] for k in ks)) for t in ts]
+                cumulative = gp.LinExpr()
+                for t in ts:
+                    cumulative += energy[t]
+                    excess = m.addVar(lb=0.0)
+                    m.addConstr(excess >= cumulative - float(ramp["cap"][b][t]))
+                    obj += ramp["cumulative_weight"] * excess * excess
     if local is not None:
         # simulate_realtime_reoptimise._solve_local_building: planned trades are upper bounds
         # (same direction, never more), P2P settlement, and a charge on planned P2P not delivered
@@ -140,7 +237,26 @@ def _build(data, b, env, local=None):
     names = ("charge", "discharge", "soc", "cs", "p_el", "curtail", "p_hp", "f", "q_boiler", "gas", "T_in")
     variables = dict(zip(names, (charge, discharge, soc, cs, p_el, curtail, p_hp, f, q_boiler, gas, T_in)))
     variables.update(q=q, qpos=qpos, qneg=qneg)
-    return {"model": m, "vars": variables, "q_flat": [var for row in q for var in row], "shape": (K, T)}
+    return {"model": m, "vars": variables, "q_flat": [var for row in q for var in row], "shape": (K, T),
+            "q_offset": q_offset, "links": links}
+
+
+def _state_values(entry):
+    """Value (GBP per unit, + = worth having) of the battery charge and indoor temperature at the end
+    of the first step, from the duals of the dynamics linking step 0 to step 1 (convex subproblem).
+
+    Raising the state at the end of step 0 by d shifts row 1 by -a d, where a is the state's coefficient
+    in that row; the objective changes by Pi (-a d), so the value is Pi * a. 0 for a one-step horizon.
+    """
+    values = []
+    for name in ("soc", "T_in"):
+        row = entry["links"][name][1] if len(entry["links"][name]) > 1 else None
+        if row is None:
+            values.append(0.0)
+            continue
+        coefficient = entry["model"].getCoeff(row, entry["vars"][name][0])
+        values.append(float(row.Pi) * float(coefficient))
+    return tuple(values)
 
 
 def _values(entry, name):
@@ -181,7 +297,8 @@ def _solve(models, data, buildings, rho, lam, zloc, env=None, cache=None):
     for b in buildings:
         started = time.perf_counter()
         entry = models[b] if cache is None else _build(data, b, env)
-        entry["model"].setAttr("Obj", entry["q_flat"], (lam[b] - rho * zloc[b]).ravel().tolist())
+        entry["model"].setAttr("Obj", entry["q_flat"],
+                               (lam[b] - rho * zloc[b] + entry.get("q_offset", 0.0)).ravel().tolist())
         entry["model"].optimize()
         seconds = time.perf_counter() - started
         status = entry["model"].Status
@@ -239,6 +356,8 @@ def _worker(conn, buildings):
                     reply = {b: {name: cache[b][name] for name in payload} for b in buildings}
                 else:
                     reply = {b: {name: _values(models[b], name) for name in payload} for b in buildings}
+            elif command == "state_values":
+                reply = {b: _state_values(models[b]) for b in buildings}
             elif command == "local":
                 data, planned, share_penalty, first_step = payload
                 reply = _solve_local(data, buildings, planned, share_penalty, first_step, env)
@@ -252,8 +371,11 @@ def _worker(conn, buildings):
 # ============================================================================
 # DRIVER SIDE
 # ============================================================================
+EXTRA_DATA = {}  # merged into _problem_data(); e.g. {"tracking": ...} from 08_minute_resolution/three_timescale.py
+
+
 def _problem_data():
-    """Snapshot of the optimiser's module state (honours reopt.remaining_horizon)."""
+    """Snapshot of the optimiser's module state (honours reopt.remaining_horizon), plus EXTRA_DATA."""
     import admm_bilateral_p2p_valley as OPT
 
     C = OPT.C
@@ -270,6 +392,9 @@ def _problem_data():
         "eta_charge": C.eta_charge, "eta_discharge": C.eta_discharge, "p_th_nom": C.p_th_nom,
         "efficiency": C.efficiency, "hp_max_power": C.hp_max_power, "max_thermal_power": C.max_thermal_power,
         "gas_price": C.gas_price, "alpha": C.alpha, "FEE_FRAC": float(OPT.FEE_FRAC),
+        "NETWORK_CHARGE": OPT.network_charge_matrix()[0] if OPT.NETWORK_CHARGE else None,
+        "NETWORK_LOSSES": OPT.network_loss_matrix() if OPT.NETWORK_LOSSES else None,
+        **EXTRA_DATA,
     }
 
 
@@ -406,6 +531,14 @@ class ParallelADMM:
         for chunk in self._broadcast("extract", list(names)):
             out.update(chunk)
         return [out[b] for b in sorted(out)]
+
+    def state_values(self):
+        """(N, 2): each building's value of battery charge (GBP/kWh) and indoor temperature (GBP/degC)
+        at the end of the first step, from the last ADMM iteration's subproblem duals (see _state_values)."""
+        out = {}
+        for chunk in self._broadcast("state_values", None):
+            out.update(chunk)
+        return np.array([out[b] for b in sorted(out)], dtype=float)
 
     def local_step(self, planned, share_penalty, first_step):
         """One local re-optimisation per building over the current horizon (no ADMM).

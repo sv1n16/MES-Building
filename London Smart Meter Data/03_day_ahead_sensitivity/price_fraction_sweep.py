@@ -1,4 +1,12 @@
 """Sweep the P2P settlement-price fraction (default 0.1 -> 1.0 x grid tariff) for
+
+PURPOSE
+    Which P2P price (as a fraction of the grid tariff) leaves EVERY building better
+    off than without sharing? The dispatch is solved once; only the settlement changes.
+COMPUTED PER frac
+    cost_b(frac)    = Σ_t (π_t g_b,t + c_gas G_b,t) Δt + frac·Σ_t π_t (recv_b,t − sent_b,t) Δt
+    benefit_b(frac) = cost_b(own_battery) − cost_b(frac)
+    individually rational  ⇔  benefit_b(frac) ≥ 0 for all b
 the central market model and the bilateral consensus-ADMM.
 
 In FEE_MODE="market" the settlement is a pure buyer<->seller transfer: for ANY

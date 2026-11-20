@@ -13,15 +13,29 @@ solve's initial state.
 local   Each building re-optimises its own remaining horizon on its own. No new
         P2P trades are negotiated: the planned trade with each neighbour is an
         upper bound that the building may honour or curtail (same direction,
-        never more). Objective per building:
-            operating cost + P2P settlement
-            + cost_penalty  * |cost - original planned cost| / |original planned cost|
-            + share_penalty * (planned P2P energy - delivered P2P energy)   [GBP/kWh]
+        never more). Objective per building b over the remaining hours t = h..T−1:
+
+            min  Σ_t [ π_t g_t Δt + c_gas G_t Δt + α (T_t − T^set_t)² + w_t g_t² ]   own cost
+               + Σ_t Σ_j FEE_FRAC π_t Δt (q⁻_j,t − q⁺_j,t)                          P2P settlement
+               + share_penalty Σ_t Σ_j Δt (|q^plan_j,t| − q⁺_j,t − q⁻_j,t)            undelivered P2P
+            s.t. building model B_b,  0 ≤ q⁺_j,t ≤ max(q^plan_j,t, 0),
+                                      0 ≤ q⁻_j,t ≤ max(−q^plan_j,t, 0)
+
+        NOTE: the cost_penalty term  cost_penalty·|cost − planned cost|/|planned cost|
+        is built (m.cost_deviation) but is commented OUT of the objective, so
+        --cost-penalty currently has no effect on the solution.
         After all buildings solve, each pair trades the smaller of the seller's
         offer and the buyer's acceptance; a buyer's shortfall is imported from
         the grid and a seller's unsold surplus is curtailed.
 admm    Bilateral ADMM is re-run over the remaining horizon at every interval,
         warm-started from the previous interval's duals/trades (or cold).
+        Same subproblem as admm_bilateral_p2p_valley (own cost + congestion
+        + λ q + ρ/2 (q − z)²), with ROLLING_FIRST_INTERVAL so hour h is a decision.
+
+Receding horizon, for every interval h = 0..T−1:
+    1. inputs for h..T−1  <- measured (noisy) values, or forecast beyond h
+    2. solve over h..T−1 from the measured SOC / indoor temperature
+    3. apply only hour h; the realised state starts the next solve
 
 Every solve is timed (model build + solver call) and written to a timing CSV
 so the real-time feasibility of each method can be analysed.
@@ -310,6 +324,7 @@ def _solve_local_building(building, start, schedule, solver, cost_penalty, share
             m.qpos[k, t].setub(max(float(planned_trade[k, t]), 0.0))
             m.qneg[k, t].setub(max(float(-planned_trade[k, t]), 0.0))
 
+    # own cost + P2P settlement:  Σ_t π g Δt + c_gas G Δt + α (T − T_set)² + FEE_FRAC π Δt Σ_k (q⁻ − q⁺)  [+ w g²]
     cost = sum(
         OPT.PRICE[t] * m.p_el[t] * DT
         + C.gas_price / 100.0 * m.gas[t] * DT
@@ -328,6 +343,8 @@ def _solve_local_building(building, start, schedule, solver, cost_penalty, share
     share_deviation = sum(
         (abs(float(planned_trade[k, t])) - m.qpos[k, t] - m.qneg[k, t]) * DT for k in m.k for t in m.t
     )
+    # Objective actually solved:  cost + share_penalty · (planned |q| − delivered q⁺ − q⁻)·Δt
+    # The cost-deviation term below is DISABLED, so cost_penalty is unused (constraints kept).
     # m.local_obj = pyo.Objective(
     #     expr=cost + cost_penalty * m.cost_deviation + share_penalty * share_deviation,
     #     sense=pyo.minimize,

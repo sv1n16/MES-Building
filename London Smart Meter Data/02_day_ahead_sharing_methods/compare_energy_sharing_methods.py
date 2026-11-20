@@ -1,5 +1,16 @@
 """Compare rule-based, central, exchange-ADMM, and bilateral-ADMM sharing.
 
+PURPOSE
+    Compare every day-ahead sharing method on the same day and the same buildings:
+    no sharing, rule-based, central MIQCP, exchange ADMM, bilateral ADMM and
+    bilateral ADMM + peak reduction (congestion term  Σ_t w_t g_t²).
+    No new model here: each method is imported and run; this script scores them.
+METRICS
+    op cost   = Σ_b Σ_t (π_t g_b,t + c_gas G_b,t) Δt  (+ community fees)
+    peak      = max_t Σ_b g_b,t
+    comfort   = RMS_b,t (T_b,t − T^set_t)
+    per-building saving vs own-battery baseline = cost_b^own − cost_b^method
+
 The comparison uses the current hourly showcase dataset and writes one row per
 method to ``Results/02_day_ahead_sharing_methods/22_energy_sharing_method_comparison.csv``. Metrics are:
 

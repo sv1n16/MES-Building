@@ -1,4 +1,39 @@
-"""Fully-decentralised consensus-ADMM for peer-to-peer energy sharing.
+"""Fully-decentralised consensus-ADMM for peer-to-peer energy sharing
+— the "valley-filling" (peak-reduction) variant used by every real-time script.
+
+PURPOSE
+    Reach the same community schedule as the central market model
+    (central_optimisation_showcase, FEE_MODE="market") without a coordinator:
+    each building only solves its own problem and talks to its neighbours.
+    Differs from 02_day_ahead_sharing_methods/admm_bilateral_p2p.py by
+      * a quadratic CONGESTION term on grid import (use_congestion), which
+        raises the marginal cost of importing in expensive hours and so pushes
+        import into the cheap "valley" hours (lower community peak);
+      * warm starts (init_lam / init_Z), per-solve timing (solve_log) and
+        ROLLING_FIRST_INTERVAL (hour 0 is a decision, not the fixed initial
+        state), needed by the rolling / real-time scripts.
+
+BUILDING SUBPROBLEM  (x-update, solved by every building b in parallel)
+
+    min  Σ_t [ π_t g_t Δt + c_gas G_t Δt + α (T_t − T^set_t)²       own cost
+             + w_t g_t² ]                                           congestion
+         + Σ_j Σ_t λ_bj,t q_bj,t                                    price of trades
+         + ρ/2 Σ_j Σ_t (q_bj,t − z_bj,t)²                           stay near agreement
+         + 1e-4 Σ_j Σ_t q⁺_bj,t                                     routing tie-breaker
+         [+ Σ_j Σ_t (γ_bj/2)(q⁺_bj,t + q⁻_bj,t) Δt                  network charge, if NETWORK_CHARGE]
+         [+ Σ_j Σ_t (κ_bj/2) π_t q_bj,t² Δt                          network losses, if NETWORK_LOSSES]
+    s.t. building model B_b (battery, COP-fixed heat pump, boiler, thermal;
+         see central_optimisation_showcase), with the P2P terms written as
+           g − Σ_j q_bj − κ = L + c + p_hp − d − PV,     q_bj = q⁺_bj − q⁻_bj
+           Σ_j q⁺_bj ≤ PV + d,      Σ_j q⁻_bj ≤ L + p_hp + c
+
+    q_bj,t  = b's copy of the trade with j (kW, + = b delivers to j)
+    w_t     = 0.01 + 0.04 (π_t − π_min)/(π_max − π_min)   (congestion weight)
+
+COORDINATION  (pair {b,j}, leading building min(b,j))
+    z-update   Z_bj,t = ½ (q_bj,t − q_jb,t)                  average of the two copies
+    λ-update   λ_bj,t ← λ_bj,t + ρ (q_bj,t − z_bj,t)
+    stop       RMS(q − z) ≤ EPS_PRIMAL and RMS(ΔZ) ≤ EPS_DUAL for STOP_STREAK iterations
 
 Reimplementation of the algorithm in
 
@@ -87,10 +122,55 @@ PRICE_HIGH_COLOR, PRICE_LOW_COLOR, ADMM_COLOR = "#d98a29", "#5b8fc9", "#2e8b6e"
 PRICE_MEDIUM_COLOR = "#8b78b5"
 
 
+# ---------------------------------------------------------------- peak reduction ("valley filling")
+# Adds  Σ_t w_t·g_t²  to each building's cost, with w_t rising linearly from 0.01 (cheapest
+# hour) to 0.05 £/kW²h (dearest hour). Its marginal cost 2·w_t·g_t makes large imports in
+# expensive hours costly, so batteries shift import into the cheap valley hours.
 use_congestion = True
 congestion_weight = 0.01 + 0.04 * (C.PRICE - C.PRICE.min()) / (C.PRICE.max() - C.PRICE.min())
-# ingredient for approach 1 -- shapes the MARGINAL cost of importing
+
+# Rolling / real-time mode: True makes hour 0 a decision (battery may act, temperature moves
+# from the measured state) instead of pinning it to the initial state. Set by the real-time scripts.
 ROLLING_FIRST_INTERVAL = False
+
+# ---------------------------------------------------------------- exogenous network charge (Baroche et al. 2019)
+# Optional, off by default. Every kWh traded between buildings i and j pays γ_ij to the network operator,
+# half by the seller and half by the buyer, so building b's subproblem gets
+#     Σ_j Σ_t (γ_bj / 2) (q⁺_bj,t + q⁻_bj,t) Δt
+# Distance-based design (Baroche et al. 2019, "Exogenous cost allocation in P2P electricity markets"):
+#     γ_ij = NETWORK_CHARGE_GBP_PER_KWH × d_ij / mean_pairs(d)      (so the charges average the given rate)
+# The LCL data has no locations, so d_ij comes from synthetic building positions, drawn once with a fixed seed
+# in a NETWORK_AREA_M square. A pair-specific charge also gives routing a real price, so it pins down who trades
+# with whom instead of leaving the pairings to the 1e-4 tie-breaker.
+NETWORK_CHARGE = False
+NETWORK_CHARGE_GBP_PER_KWH = 0.01  # 1 p/kWh on average
+NETWORK_LAYOUT_SEED = 7
+NETWORK_AREA_M = 500.0
+
+
+# ---------------------------------------------------------------- quadratic per-pair network losses (Talebi et al. 2025)
+# Optional, off by default. A trade of q kW between i and j loses κ_ij q² kW, valued at the grid tariff and
+# split half / half, so building b's subproblem gets
+#     Σ_j Σ_t (κ_bj / 2) π_t q_bj,t² Δt
+#     κ_ij = NETWORK_LOSS_PER_KW × d_ij / mean_pairs(d)    (fraction lost per kW traded; same layout as above)
+# The term is strictly convex in every trade, so the pairing is unique (unlike the linear charge, which only
+# pins pairings at corners). Simplification: losses are charged as a cost and not removed from the power balance.
+NETWORK_LOSSES = False
+NETWORK_LOSS_PER_KW = 0.02  # a 1 kW trade loses 2% on average
+
+
+def network_loss_matrix():
+    """(N, N) loss coefficient κ_ij (fraction lost per kW traded), on the network-charge layout."""
+    charge, _positions = network_charge_matrix()
+    return NETWORK_LOSS_PER_KW * charge / NETWORK_CHARGE_GBP_PER_KWH
+
+
+def network_charge_matrix():
+    """(N, N) charge γ_ij in GBP per kWh traded (0 on the diagonal), and the (N, 2) building positions in metres."""
+    positions = np.random.default_rng(NETWORK_LAYOUT_SEED).uniform(0.0, NETWORK_AREA_M, size=(N, 2))
+    distance = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
+    mean = distance[np.triu_indices(N, 1)].mean() if N > 1 else 1.0
+    return NETWORK_CHARGE_GBP_PER_KWH * distance / mean, positions
 
 
 # ============================================================================
@@ -102,6 +182,8 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.k = pyo.RangeSet(0, N - 2)  # neighbour index (into NB[b])
     dom = pyo.NonNegativeReals if RELAX_BINARIES else pyo.Binary
     pv_b = PV_B[b]
+    gamma = network_charge_matrix()[0][b] if NETWORK_CHARGE else None  # γ_bj, GBP per kWh
+    kappa = network_loss_matrix()[b] if NETWORK_LOSSES else None  # κ_bj, fraction lost per kW traded
 
     m.charge = pyo.Var(m.t, bounds=(0, C.MAXPOW[b]), initialize=0)
     m.discharge = pyo.Var(m.t, bounds=(0, C.MAXPOW[b]), initialize=0)
@@ -122,7 +204,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.lam = pyo.Param(m.k, m.t, initialize=0.0, mutable=True)  # dual on the consensus
     m.zloc = pyo.Param(m.k, m.t, initialize=0.0, mutable=True)  # agreed trade, b's sign
 
-    # --- battery ---
+    # --- battery:  c ≤ u·P̄,  d ≤ (1−u)·P̄,  s_t = s_{t−1} + (η_c c_t − d_t/η_d)Δt ---
     m.c_cmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.charge[t] <= mm.cs[t] * C.MAXPOW[b])
     m.c_dmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.discharge[t] <= (1 - mm.cs[t]) * C.MAXPOW[b])
 
@@ -148,6 +230,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             m.cs[t].fix(0)
 
     # --- heat pump / boiler (fixed COP -> linear) ---
+    # COP_t·p_hp,t = p_th_nom·f_t ,   G_t = q_boil,t / η_boil
     m.c_hp = pyo.Constraint(m.t, rule=lambda mm, t: COP[t] * mm.p_hp[t] == C.p_th_nom * mm.f[t])
     m.c_gas = pyo.Constraint(m.t, rule=lambda mm, t: mm.gas[t] == mm.q_boiler[t] / C.efficiency)
 
@@ -165,6 +248,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
+    # thermal:  T_t = T_{t−1} + Δt/10·( p_th_nom·f_t + q_boil,t − 0.5·(T_{t−1} − T_out,t) )
     m.c_therm = pyo.Constraint(m.t, rule=thermal)
 
     # --- electricity balance & per-hour trade limits ---
@@ -177,6 +261,8 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     # re-export to another beyond its own generation / consumption.
     m.c_qsplit = pyo.Constraint(m.k, m.t, rule=lambda mm, k, t: mm.q[k, t] == mm.qpos[k, t] - mm.qneg[k, t])
 
+    # power balance:  g − Σ_k q_k − κ = L + c + p_hp − d − PV
+    # export limit:   Σ_k q⁺_k ≤ PV + d          import limit:  Σ_k q⁻_k ≤ L + p_hp + c
     m.c_bal = pyo.Constraint(
         m.t,
         rule=lambda mm, t: mm.p_el[t] - qnet(mm, t) - mm.curtail[t]
@@ -187,6 +273,9 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
         m.t, rule=lambda mm, t: sum(mm.qneg[k, t] for k in mm.k) <= C.LOAD[b, t] + mm.p_hp[t] + mm.charge[t]
     )
 
+    # objective (paper eq 32):
+    #   own cost  Σ_t π g Δt + c_gas G Δt + α (T − T_set)²   [+ w_t g² if use_congestion]
+    #   + Σ λ·q  + ρ/2 Σ (q − z)²  + 1e-4 Σ q⁺
     def obj(mm):
         cost = sum(
             PRICE[t] * mm.p_el[t] * DT
@@ -206,6 +295,10 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
         # already makes the objective strictly convex in q, so no separate 1e-4*q²
         # tie-breaker is needed (and that term is a persistent bias absent from central).
         route = 1e-4 * sum(mm.qpos[k, t] for k in mm.k for t in mm.t)
+        if NETWORK_CHARGE:  # exogenous network charge, half of γ_bj per kWh on each side of the trade
+            cost += sum(gamma[NB[b][k]] / 2.0 * (mm.qpos[k, t] + mm.qneg[k, t]) * DT for k in mm.k for t in mm.t)
+        if NETWORK_LOSSES:  # quadratic per-pair losses valued at the tariff, half on each side
+            cost += sum(kappa[NB[b][k]] / 2.0 * PRICE[t] * mm.q[k, t] ** 2 * DT for k in mm.k for t in mm.t)
         return cost + lin + prox + route
 
     m.obj = pyo.Objective(rule=obj, sense=pyo.minimize)

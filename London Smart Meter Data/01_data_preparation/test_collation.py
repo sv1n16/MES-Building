@@ -1,4 +1,10 @@
-"""Test script to demonstrate building, PV, and weather data collation."""
+"""Smoke test of the data loaders in common/data_exploration.py.
+
+PURPOSE
+    Check that the PV, weather, device-list and LCL loaders run and that the
+    collated building + PV + weather table has sensible columns and date ranges.
+    No optimisation; prints [OK] / [ERROR] per step.
+"""
 
 import sys
 from pathlib import Path

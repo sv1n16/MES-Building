@@ -1,5 +1,14 @@
 """Benchmark bilateral ADMM tolerances against the centralized sharing solution.
 
+PURPOSE
+    How loose can the ADMM stopping tolerance ε be before the answer drifts
+    from the central optimum? For each ε, bilateral ADMM (valley variant) is
+    run from a fresh state and stopped when RMS primal and dual residuals ≤ ε.
+COMPARED WITH ONE CENTRAL SOLVE
+    per-building cost  = Σ_t (π_t g_b,t + c_gas G_b,t) Δt + P2P settlement
+    deviation_b(ε)     = cost_b^ADMM(ε) − cost_b^central
+    also: iterations, grid energy, comfort RMS, energy shared.
+
 Run from this directory with:
 
     py -3.13 admm_bilateral_tolerance_sweep.py

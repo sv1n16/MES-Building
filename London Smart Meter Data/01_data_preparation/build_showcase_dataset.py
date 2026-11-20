@@ -1,5 +1,10 @@
 """Collate the input dataset for the best energy-sharing showcase day.
 
+PURPOSE
+    Build the model inputs every optimisation script reads (no optimisation here).
+    Per building b and hour t:  L_b,t = mean LCL demand in the hour (kW),
+    PV_b,t = PV_KWP_b × (real February per-kWp profile), π_t from the ToU tariff.
+
 Picks the day with `sharing_showcase` (diverse 10 ToU buildings, cost-optimal
 day ranking) and writes an hourly, 24-step optimisation input to
 `data/showcase_<day>.csv`, plus per-building battery sizes to

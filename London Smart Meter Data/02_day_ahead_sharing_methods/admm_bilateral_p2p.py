@@ -1,4 +1,25 @@
-"""Fully-decentralised consensus-ADMM for peer-to-peer energy sharing.
+"""Fully-decentralised consensus-ADMM for peer-to-peer energy sharing (day-ahead).
+
+PURPOSE
+    Reach the same community schedule as the central market model
+    (central_optimisation_showcase, FEE_MODE="market") without a coordinator:
+    each building only solves its own problem and exchanges its proposed
+    trades with each neighbour. This is the plain version (no congestion
+    term); common/admm_bilateral_p2p_valley.py adds peak reduction and the
+    warm-start hooks used by the real-time scripts.
+
+BUILDING SUBPROBLEM  (x-update, solved by every building b)
+
+    min  Σ_t [ π_t g_t Δt + c_gas G_t Δt + α (T_t − T^set_t)² ]     own cost
+         + Σ_j Σ_t λ_bj,t q_bj,t                                    price of trades
+         + ρ/2 Σ_j Σ_t (q_bj,t − z_bj,t)²                           stay near agreement
+         + 1e-4 Σ_j Σ_t q⁺_bj,t                                     routing tie-breaker
+    s.t. building model B_b (see central_optimisation_showcase), with
+           g − Σ_j q_bj − κ = L + c + p_hp − d − PV,     q_bj = q⁺_bj − q⁻_bj
+           Σ_j q⁺_bj ≤ PV + d,      Σ_j q⁻_bj ≤ L + p_hp + c
+
+    q_bj,t = b's copy of the trade with j (kW, + = b delivers to j).
+    Settlement afterwards: buyer pays seller FEE_FRAC·π_t per kWh.
 
 Reimplementation of the algorithm in
 
@@ -119,7 +140,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.lam = pyo.Param(m.k, m.t, initialize=0.0, mutable=True)  # dual on the consensus
     m.zloc = pyo.Param(m.k, m.t, initialize=0.0, mutable=True)  # agreed trade, b's sign
 
-    # --- battery ---
+    # --- battery:  c ≤ u·P̄,  d ≤ (1−u)·P̄,  s_t = s_{t−1} + (η_c c_t − d_t/η_d)Δt ---
     m.c_cmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.charge[t] <= mm.cs[t] * C.MAXPOW[b])
     m.c_dmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.discharge[t] <= (1 - mm.cs[t]) * C.MAXPOW[b])
 
@@ -140,6 +161,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             m.cs[t].fix(0)
 
     # --- heat pump / boiler (fixed COP -> linear) ---
+    # COP_t·p_hp,t = p_th_nom·f_t ,   G_t = q_boil,t / η_boil
     m.c_hp = pyo.Constraint(m.t, rule=lambda mm, t: COP[t] * mm.p_hp[t] == C.p_th_nom * mm.f[t])
     m.c_gas = pyo.Constraint(m.t, rule=lambda mm, t: mm.gas[t] == mm.q_boiler[t] / C.efficiency)
 
@@ -151,6 +173,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
+    # thermal:  T_t = T_{t−1} + Δt/10·( p_th_nom·f_t + q_boil,t − 0.5·(T_{t−1} − T_out,t) )
     m.c_therm = pyo.Constraint(m.t, rule=thermal)
 
     # --- electricity balance & per-hour trade limits ---
@@ -163,6 +186,8 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     # re-export to another beyond its own generation / consumption.
     m.c_qsplit = pyo.Constraint(m.k, m.t, rule=lambda mm, k, t: mm.q[k, t] == mm.qpos[k, t] - mm.qneg[k, t])
 
+    # power balance:  g − Σ_k q_k − κ = L + c + p_hp − d − PV
+    # export limit:   Σ_k q⁺_k ≤ PV + d          import limit:  Σ_k q⁻_k ≤ L + p_hp + c
     m.c_bal = pyo.Constraint(
         m.t,
         rule=lambda mm, t: mm.p_el[t] - qnet(mm, t) - mm.curtail[t]
@@ -173,6 +198,9 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
         m.t, rule=lambda mm, t: sum(mm.qneg[k, t] for k in mm.k) <= C.LOAD[b, t] + mm.p_hp[t] + mm.charge[t]
     )
 
+    # objective (paper eq 32):
+    #   own cost  Σ_t π g Δt + c_gas G Δt + α (T − T_set)²   [+ w_t g² if use_congestion]
+    #   + Σ λ·q  + ρ/2 Σ (q − z)²  + 1e-4 Σ q⁺
     def obj(mm):
         cost = sum(
             PRICE[t] * mm.p_el[t] * DT

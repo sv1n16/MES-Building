@@ -1,5 +1,16 @@
 """Receding-horizon centralised re-optimisation of the community.
 
+PROBLEM   (solved at every hour h over the remaining hours t = h..T−1)
+
+    min  Σ_b Σ_t [ π_t g_b,t Δt + c_gas G_b,t Δt + α (T_b,t − T^set_t)² + w_t g_b,t²
+                 + 1e-4 Σ_j q⁺_bj,t
+                 (+ Σ_j (γ_bj/2)(q⁺_bj,t + q⁻_bj,t) Δt  network charge, if OPT.NETWORK_CHARGE)
+                 (+ Σ_j (κ_bj/2) π_t q_bj,t² Δt          network losses, if OPT.NETWORK_LOSSES) ]
+    s.t. building model B_b for every b (as in the ADMM subproblems)
+         q_bj,t + q_jb,t = 0   for every pair {b,j}      (trades agree exactly)
+
+    i.e. the problem bilateral ADMM converges to, solved in one call.
+
 At every interval a single central operator re-solves the whole community over
 the remaining horizon and applies only the first-interval decisions; the
 realised battery SOC / indoor temperature become the next solve's initial
@@ -61,6 +72,7 @@ def build_central_model():
         setattr(m, f"building_{b}", sub)
         subs.append(sub)
 
+    # hard consensus instead of ADMM's penalty:  q_lo[hi,t] + q_hi[lo,t] = 0
     # b's copy of the trade with j (+ = b delivers) must mirror j's copy with b
     m.c_consensus = pyo.ConstraintList()
     for lo, hi in OPT.PAIRS:
@@ -68,7 +80,11 @@ def build_central_model():
         for t in range(OPT.T):
             m.c_consensus.add(subs[lo].q[k_lo, t] + subs[hi].q[k_hi, t] == 0)
 
-    def building_cost(sub):
+    # Σ_t π g Δt + c_gas G Δt + α (T − T_set)² [+ w_t g²] + 1e-4 Σ q⁺   (no λ / ρ terms)
+    gamma = OPT.network_charge_matrix()[0] if OPT.NETWORK_CHARGE else None  # γ_ij, GBP per kWh traded
+    kappa = OPT.network_loss_matrix() if OPT.NETWORK_LOSSES else None  # κ_ij, fraction lost per kW traded
+
+    def building_cost(b, sub):
         cost = sum(
             OPT.PRICE[t] * sub.p_el[t] * DT
             + C.gas_price / 100.0 * sub.gas[t] * DT
@@ -79,9 +95,15 @@ def build_central_model():
             cost += sum(OPT.congestion_weight[t] * sub.p_el[t] ** 2 for t in sub.t)
         # same routing regulariser as the ADMM subproblems
         cost += 1e-4 * sum(sub.qpos[k, t] for k in sub.k for t in sub.t)
+        if gamma is not None:  # same exogenous network charge as the ADMM subproblems (half per side)
+            cost += sum(gamma[b, OPT.NB[b][k]] / 2.0 * (sub.qpos[k, t] + sub.qneg[k, t]) * DT
+                        for k in sub.k for t in sub.t)
+        if kappa is not None:  # same quadratic per-pair losses as the ADMM subproblems (half per side)
+            cost += sum(kappa[b, OPT.NB[b][k]] / 2.0 * OPT.PRICE[t] * sub.q[k, t] ** 2 * DT
+                        for k in sub.k for t in sub.t)
         return cost
 
-    m.obj = pyo.Objective(expr=sum(building_cost(sub) for sub in subs), sense=pyo.minimize)
+    m.obj = pyo.Objective(expr=sum(building_cost(b, sub) for b, sub in enumerate(subs)), sense=pyo.minimize)
     return m, subs
 
 

@@ -1,5 +1,13 @@
 """Penalty-parameter (rho) sweep for the decentralised ADMM methods.
 
+PURPOSE
+    Which ADMM penalty ρ converges fastest without hurting the answer?
+    ρ weights the proximal term ρ/2 Σ (q − z)² in every building subproblem
+    (and scales the dual step λ ← λ + ρ (q − z)).
+RECORDED PER ρ
+    iterations to reach the tolerance, wall time, primal-residual trace,
+    RMS_b (cost_b^ADMM − cost_b^central) / |cost_b^central|
+
 For each rho it runs the ADMM to (attempted) convergence with ADAPT_RHO off and
 records: iterations to converge, wall time, the primal-residual trace, and the
 per-building operating-cost RMS vs the central market optimum (both settled at

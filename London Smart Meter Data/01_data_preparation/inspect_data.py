@@ -1,3 +1,12 @@
+"""Quick look at the raw PV and weather spreadsheets (first rows and columns).
+
+PURPOSE
+    Sanity-check the input files before building datasets. No optimisation, no outputs;
+    prints the columns, shape and first row of
+      PV Data/Weather Data 2014-11-30.xlsx
+      PV Data/deviceListTable ... customer addresses removed.xlsx
+"""
+
 
 import sys
 from pathlib import Path

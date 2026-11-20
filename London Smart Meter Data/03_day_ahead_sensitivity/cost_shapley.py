@@ -1,5 +1,13 @@
 """Allocate community operating-cost savings to buildings with Shapley values.
 
+PURPOSE
+    Fair split of the community saving: how much of it does each building create?
+SHAPLEY VALUE
+    φ_i = Σ_{S ⊆ N∖{i}}  |S|! (n − |S| − 1)! / n!  · [ v(S ∪ {i}) − v(S) ]
+    v(S) = Σ_{i∈S} cost_i(no sharing) − cost(S, sharing only inside S)
+    cost = electricity + gas from the central model (central_optimisation_showcase)
+    --exact: all 2^n coalitions;  default: mean marginal contribution over random orderings.
+
 The coalition value is the coalition's no-sharing electricity and gas cost
 minus its optimized shared-coalition electricity and gas cost. The default
 estimates Shapley values by random permutations; ``--exact`` evaluates all

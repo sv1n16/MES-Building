@@ -1,5 +1,8 @@
 """Plot household consumption vs time and PV generation vs time.
 
+PURPOSE
+    Figures only: what the raw LCL demand and PV data look like over time.
+
 Figures produced:
   Results/01_data_preparation/01_consumption_over_time.png    - mean half-hourly consumption per ToU household
   Results/01_data_preparation/02_pv_generation_over_time.png  - mean PV generation across monitored endpoints

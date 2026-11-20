@@ -1,3 +1,15 @@
+"""Load and explore the raw LCL smart-meter, tariff, PV and weather data.
+
+PURPOSE
+    Shared data loaders used by the data-preparation scripts (no optimisation):
+      load_tou_data / assign_tariff_prices   LCL ToU households with p/kWh per half-hour
+                                             (Low 3.99, Medium/Normal 11.76, High 67.20)
+      select_diverse_buildings               pick N households with different demand shapes
+      find_complementary_pairs               pairs whose demand profiles are least correlated
+      estimate_battery_size_per_building     battery ~ target_hours x typical demand
+      load_pv_data / load_weather_data / load_device_list / collate_building_pv_weather
+"""
+
 from __future__ import annotations
 
 import sys

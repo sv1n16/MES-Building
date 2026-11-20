@@ -1,6 +1,25 @@
 """Decentralised (ADMM) energy sharing — exchange-ADMM decomposition of the
 central showcase optimisation in central_optimisation_showcase.py.
 
+PURPOSE
+    Share energy through a common POOL (not pairwise trades): every building
+    decides only how much it exports to / imports from the pool, and a single
+    price per hour emerges that balances the pool.
+
+PROBLEM   (exchange problem, Boyd et al. §7.3.2)
+
+    min  Σ_b C_b(x_b)   s.t.  Σ_b pex_b,t = 0  ∀t      (pool balances every hour)
+
+    C_b = Σ_t π_t g_b,t Δt + c_gas G_b,t Δt + α (T_b,t − T^set_t)²,
+    x_b ∈ building model B_b with the P2P terms replaced by pex_b:
+        g − pex − κ = L + c + p_hp − d − PV,    −(L + p_hp + c) ≤ pex ≤ PV + d
+
+ADMM ITERATION  (scaled form, u = scaled dual)
+    x-update   pex_b ← argmin C_b + ρ/2 Σ_t (pex_b,t − (pex_b,t^k − p̄_t^k − u_t^k))²
+    u-update   u_t ← u_t + p̄_t^{k+1}                    (p̄ = mean_b pex_b)
+    stop       max_t |Σ_b pex_b,t| < EPS_PRIMAL  and  ρN·max_t |Δp̄_t| < EPS_DUAL
+    pool price at convergence:  y_t = −ρ·u_t  (£/kWh paid to a net exporter)
+
 Each building solves ONLY its own subproblem: minimise its private operating cost
 (grid electricity + gas + thermal-comfort penalty) by choosing a net
 export-to-pool profile  pex_b[t]  (kW, + = exporting to the community, - = importing
@@ -89,7 +108,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.rho = pyo.Param(initialize=RHO, mutable=True)
     m.center = pyo.Param(m.t, initialize=0.0, mutable=True)  # pex_b - xbar - u
 
-    # --- battery ---
+    # --- battery:  c ≤ u·P̄,  d ≤ (1−u)·P̄,  s_t = s_{t−1} + (η_c c_t − d_t/η_d)Δt ---
     m.c_cmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.charge[t] <= mm.cs[t] * C.MAXPOW[b])
     m.c_dmax = pyo.Constraint(m.t, rule=lambda mm, t: mm.discharge[t] <= (1 - mm.cs[t]) * C.MAXPOW[b])
 
@@ -121,9 +140,11 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
             return mm.T_in[t] == float(C.INIT_T_IN[b])
         return mm.T_in[t] == mm.T_in[t - 1] + DT / 10 * (q_heat(mm, t) - 0.5 * (mm.T_in[t - 1] - C.T_OUT[t]))
 
+    # thermal:  T_t = T_{t−1} + Δt/10·( q_heat,t − 0.5·(T_{t−1} − T_out,t) )
     m.c_therm = pyo.Constraint(m.t, rule=thermal)
 
     # --- electricity balance & pool interaction limits ---
+    #   g − pex − κ = L + c + p_hp − d − PV ,    −(L + p_hp + c) ≤ pex ≤ PV + d
     m.c_bal = pyo.Constraint(
         m.t,
         rule=lambda mm, t: mm.p_el[t] - mm.pex[t] - mm.curtail[t]
@@ -132,6 +153,7 @@ def build_subproblem(b: int) -> pyo.ConcreteModel:
     m.c_exp = pyo.Constraint(m.t, rule=lambda mm, t: mm.pex[t] <= pv_b[t] + mm.discharge[t])
     m.c_imp = pyo.Constraint(m.t, rule=lambda mm, t: mm.pex[t] >= -(C.LOAD[b, t] + mm.p_hp[t] + mm.charge[t]))
 
+    # objective:  own cost C_b  +  ρ/2 Σ_t (pex_t − center_t)²
     def obj(mm):
         cost = sum(
             C.PRICE[t] * mm.p_el[t] * DT
@@ -174,6 +196,7 @@ def run_admm():
 
     print(f"ADMM  N={N}  T={T}  rho0={RHO}  relax_binaries={RELAX_BINARIES}")
     for k in range(MAX_ITERS):
+        # ---- x-update: each building solves its subproblem around (pex_b − p̄ − u) ----
         xbar = pex.mean(axis=0)
         for b, m in enumerate(subs):
             center = pex[b] - xbar - u
@@ -183,6 +206,7 @@ def run_admm():
             solver.solve(m, tee=False)
             pex[b] = _val(m, "pex")
 
+        # ---- u-update (scaled dual) and residuals ----
         xbar_new = pex.mean(axis=0)
         u = u + xbar_new
         primal = float(np.abs(pex.sum(axis=0)).max())  # |Σ_b pex_b[t]|

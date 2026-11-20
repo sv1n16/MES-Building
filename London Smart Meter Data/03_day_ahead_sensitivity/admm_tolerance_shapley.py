@@ -1,5 +1,12 @@
 """Shapley cost-saving allocation at each bilateral ADMM stopping tolerance.
 
+PURPOSE
+    Does a looser ADMM tolerance change how the sharing saving is SPLIT between
+    buildings? Shapley values are computed with ADMM's own coalition answers.
+SHAPLEY VALUE
+    φ_i = Σ_{S ⊆ N∖{i}}  |S|! (n − |S| − 1)! / n!  · [ v(S ∪ {i}) − v(S) ]
+    v_ε(S) = Σ_{i∈S} standalone cost_i − Σ_{i∈S} ADMM cost_i(S, ε)
+
 A looser tolerance stops ADMM at a different iterate, so the energy shared and
 the cost each coalition achieves differ by tolerance. The coalition value is
 therefore evaluated with the ADMM answer itself:

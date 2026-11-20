@@ -264,6 +264,184 @@ ENTRIES = [
      "06_realtime_scaling/scale_realtime_methods.py"),
     (r"run_log\.txt", "Run log", "Console output of every step run for this size.",
      "06_realtime_scaling/scale_realtime_methods.py"),
+    # ---------------------------------------------------------------- 07 communication failure
+    (r"70_comm_failure_masks\.npz", "Communication-failure patterns",
+     "Which buildings are offline in every hour, for each failure level and noise run, with the outage "
+     "length and seed.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"71_comm_failure_results\.csv", "Communication-failure results",
+     "Real-time dispatch per failure level, run, method, interval and building, with an offline flag.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"72_comm_failure_solve_times\.csv", "Communication-failure solve times",
+     "Per-solve timings of the real-time methods under communication failures.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"73_comm_failure_summary\.csv", "Communication-failure summary",
+     "Totals per failure level, run and method, with the change against the same method without failures.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"74_comm_failure_summary_mean\.csv", "Communication-failure summary (mean)",
+     "Mean and std over runs of the communication-failure summary, per failure level and method.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"75_comm_failure_robustness\.", "Robustness to communication failures",
+     "Grouped bars per failure level: cost against rolling central without failures, cost increase against "
+     "no failure, and the change in P2P energy delivered and peak grid import, of each real-time method, "
+     "for one test (buildings offline, link failure probability or "
+     "coordinator down hours).",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"76_comm_failure_overview\.", "Communication failures: all tests",
+     "Cost increase against no failure of each real-time method against the failure level, one panel per "
+     "communication-failure test.",
+     "07_communication_failure/simulate_communication_failure.py"),
+    (r"78_comm_failure_hourly\.", "Communication failures hour by hour",
+     "Tariff, lost connections per hour and the community cost increase against no failure, hour by hour, "
+     "for each real-time method at one failure level of a test.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"79_comm_failure_who_pays\.", "Who pays for communication failures",
+     "Cost increase against no failure on the buildings while cut off (or with a lost link) and on the "
+     "others, per method and failure level; P2P payments included.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"80_comm_failure_building_heatmap\.", "Per-building cost of communication failures",
+     "Daily cost increase against no failure per building and re-optimising method at one failure level, "
+     "with each building's assets and hours hit.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"81_comm_failure_solve_effort\.", "Solve effort under communication failures",
+     "Rolling ADMM iterations against the peer-to-peer links lost in that hour, and the real-time step "
+     "latency of each method per failure level against the 1-minute and 1-hour lines.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"82_comm_failure_test_heatmap\.", "Communication failures: method x test",
+     "Daily cost increase against no failure for every test and method at the test's highest failure "
+     "level; the cheapest re-optimising method per test in bold.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"83_comm_failure_scenario_run_(?P<run>\d+)\.", "Communication failures, scenario {run}",
+     "Noise scenario {run} of one test: which building lost which connections hour by hour, the hourly "
+     "community cost increase and the change in stored battery energy against no failure per method, and "
+     "the daily cost increase of the scenario at every failure level.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"84_comm_failure_vs_admm\.", "Every method against rolling ADMM",
+     "Daily cost of each real-time method minus rolling ADMM's on the same scenario and failure level, "
+     "against the level (mean and every scenario) and hour by hour at the highest level.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"85_comm_failure_vs_admm_heatmap\.", "Against rolling ADMM: method x test",
+     "Each method's daily cost minus rolling ADMM's at every test's highest finished level, with the "
+     "number of scenarios where ADMM is cheaper, tied (within GBP 0.01) or dearer.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"90_impact_summary\.", "Impact of communication failures",
+     "Daily impact of the communication failures (cost with failures minus without, same method and "
+     "scenario) per method and failure level, and central's impact minus rolling ADMM's.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"91_impact_timeseries_level_(?P<level>[\d.]+)_run_(?P<run>\d+)\.",
+     "Communication failures over the day (level {level}, scenario {run})",
+     "When each building is offline (building x hour), and the hourly and cumulative impact of the "
+     "failures for rolling ADMM and rolling central, failure level {level}, noise scenario {run}.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"92_impact_overview\.", "Impact of communication failures: all tests",
+     "Daily impact of the communication failures at every test's highest level, per method, with "
+     "central minus rolling ADMM.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"93_computation_time\.", "Computation time under communication failures",
+     "Computation time per real-time hour of rolling ADMM (sequential and parallel estimate) and rolling "
+     "central for every failure level of a test, and the ADMM iterations per hour.",
+     "07_communication_failure/plot_communication_failure.py"),
+    (r"94_computation_time_overview\.", "Computation time: all tests",
+     "Computation time per real-time hour of rolling ADMM (parallel estimate) and rolling central, no failure "
+     "against each test's highest failure level.",
+     "07_communication_failure/plot_communication_failure.py"),
+    # ---------------------------------------------------------------- 08 minute resolution
+    (r"80_minute_inputs\.", "Hourly inputs as minute data",
+     "Hourly load, PV, outdoor temperature and tariff against the 1-minute data made from them.",
+     "08_minute_resolution/admm_minute_timing.py"),
+    (r"81_admm_minute_timing\.csv", "ADMM on minute data: timings",
+     "Per start hour and ADMM start (cold/warm): iterations, ADMM parallel time, central time and the cost "
+     "gap, for one hour of 1-minute data.",
+     "08_minute_resolution/admm_minute_timing.py"),
+    (r"82_admm_minute_timing\.", "ADMM on minute data: time to optimise an hour",
+     "Parallel-estimate time and iterations of bilateral ADMM (cold and warm start) to optimise one hour of "
+     "1-minute data, against a central solve and the 1-minute and 1-hour limits.",
+     "08_minute_resolution/admm_minute_timing.py"),
+    (r"83_admm_minute_convergence\.", "ADMM on minute data: convergence",
+     "ADMM primal and dual RMS residuals against the parallel-estimate elapsed time, cold and warm start, "
+     "for one hour of 1-minute data, with the stopping tolerance and the central solve time.",
+     "08_minute_resolution/admm_minute_timing.py"),
+    (r"84_minute_dispatch\.", "The optimised hour at 1-minute resolution",
+     "Community grid import, battery discharge minus charge, P2P traded and mean indoor temperature per "
+     "minute of the optimised hour, ADMM (cold and warm) against central.",
+     "08_minute_resolution/admm_minute_timing.py"),
+    (r"85_three_timescale_timing\.csv", "Three-timescale ADMM: solve times",
+     "One row per day-ahead, hourly and minute ADMM solve: hour, minute, horizon, iterations, parallel time.",
+     "08_minute_resolution/three_timescale.py"),
+    (r"86_three_timescale_dispatch\.csv", "Three-timescale ADMM: minute dispatch",
+     "Per minute: grid import, battery, P2P and indoor temperature applied by the minute level, the hourly "
+     "and day-ahead plans for that hour, and the departure from the hourly plan.",
+     "08_minute_resolution/three_timescale.py"),
+    (r"87_three_timescale_timing\.", "Three-timescale ADMM: computation time",
+     "Parallel-estimate time of every day-ahead, hourly and minute ADMM solve through the day, against the "
+     "1-minute and 1-hour lines, with per-level distributions.",
+     "08_minute_resolution/three_timescale.py"),
+    (r"88_three_timescale_dispatch\.", "Three-timescale ADMM: minute level tracking the hourly plan",
+     "Grid import, battery power, P2P traded, departure from the hourly plan and indoor temperature applied "
+     "by the minute level, against the hourly and day-ahead plans.",
+     "08_minute_resolution/three_timescale.py"),
+    (r"89_traded_energy_limits.*\.csv", "Traded energy against the limits (6a)-(6c)",
+     "Per minute and building of the three-timescale run: role (producer/consumer), traded energy, its change, "
+     "the ramp limit, cumulative purchases and their allocation.",
+     "09_ramp_rate_control/three_timescale_ramp_limits.py"),
+    (r"89_traded_energy_limits.*\.png", "Traded energy against the ramp and cumulative limits",
+     "Producers' largest change in P2P sales relative to the ramp limit (6a)-(6b) per minute, and consumers' "
+     "cumulative purchases against their allocation (6c).",
+     "09_ramp_rate_control/three_timescale_ramp_limits.py"),
+    (r"90_ramp_limits_comparison\.", "With and without the limits (6a)-(6c)",
+     "Three-timescale ADMM with and without the ramp and cumulative limits in the minute-level objective: "
+     "minutes over the limits, largest ramp, end-of-hour excess, electricity cost and minute solve time.",
+     "archive/09_ramp_rate_control/plot_comparison_p2p_limits.py"),
+    (r"92_cost_vs_ramp_weight\.", "Electricity cost against the ramp penalty weight",
+     "Daily electricity cost of the three-timescale ADMM run against the ramp penalty weight "
+     "(0 = without the limits), with the change against no limits.",
+     "archive/09_ramp_rate_control/plot_comparison_p2p_limits.py"),
+    (r"93_p2p_vs_ramp_weight\.", "Energy sharing against the ramp penalty weight",
+     "Daily P2P traded energy of the three-timescale ADMM run against the ramp penalty weight "
+     "(0 = without the limits), with the change against no limits.",
+     "archive/09_ramp_rate_control/plot_comparison_p2p_limits.py"),
+    (r"94_ramp_rate_sweep\.", "Tighter ramp limits: with and without the limits",
+     "For ramp limits of 10, 2 and 1 %/min: producer-minutes over the limit, largest ramp (kW/min), "
+     "end-of-hour (6c) excess, electricity cost, P2P traded energy and grid import, without and with the limit.",
+     "09_ramp_rate_control/plot_sweep.py"),
+    (r"95_ramp_rate_sweep_clouds\.", "Tighter ramp limits under passing clouds",
+     "As 94_ramp_rate_sweep, on the day with passing clouds in the minute PV (10 and 2 %/min).",
+     "09_ramp_rate_control/plot_sweep.py"),
+    (r"96_grid_ramp_sweep_", "Ramp limit on grid imports: with and without",
+     "For ramp limits of 10, 2 and 1 %/min on each building's grid import (plan-deviation weight 1): "
+     "building-minutes over the limit, largest building ramp, community grid ramp (largest and 99th "
+     "percentile), electricity cost, P2P traded energy and grid import, without and with the limit.",
+     "09_ramp_rate_control/plot_sweep.py"),
+    (r"97_grid_ramp_sweep_clouds", "Ramp limit on grid imports under passing clouds",
+     "As 96_grid_ramp_sweep, on the day with passing clouds in the minute PV.",
+     "09_ramp_rate_control/plot_sweep.py"),
+    (r"91_grid_ramp_timeseries", "Buildings' grid-import ramp rate over the day",
+     "Each building's minute-to-minute change in grid import (kW/min) against its own limit, one panel per "
+     "run (without the limit, 10, 2 and 1 %/min); _clouds with passing clouds.",
+     "09_ramp_rate_control/plot_ramp_timeseries.py"),
+    (r"98_penalty_sweep", "Plan-deviation and ramp penalty sweep",
+     "Grid-import ramp limit at 10 %/min: electricity cost, P2P traded energy, building-minutes over the "
+     "limit and the community's largest grid ramp, for plan-deviation weights 0-100 and ramp weights "
+     "0, 100, 1000, 10000.",
+     "09_ramp_rate_control/plot_penalty_sweep.py"),
+    (r"99_penalty_correlations", "Penalty sweep: correlations and trade-offs",
+     "Spearman rank correlation between the plan-deviation and ramp weights and the outcomes (cost, P2P "
+     "shared, minutes over the ramp limit, community largest grid ramp), and cost against each outcome, "
+     "one point per run (colour: plan weight, size: ramp weight).",
+     "09_ramp_rate_control/plot_penalty_correlations.py"),
+    (r"100_penalty_type", "Proportional, squared or both ramp penalties",
+     "Grid-import ramp limit at 10 %/min, plan-deviation weight 1: no limit, squared penalty only, "
+     "proportional (linear) penalty only and both; one figure per measure (minutes over the limit, total "
+     "and largest excess, community largest ramp, cost, P2P shared, minute solve time).",
+     "09_ramp_rate_control/plot_penalty_type.py"),
+    (r"91_ramp_rate_timeseries", "Producers' minute ramp rate over the day",
+     "Each producer's minute-to-minute change in P2P sales power (kW/min) against its own limit (6a)-(6b) "
+     "(ramp rate x rated power), one panel per run: ramp weights (no suffix), ramp rates (_rates) or "
+     "with passing clouds (_clouds).",
+     "09_ramp_rate_control/plot_ramp_timeseries.py"),
+    (r"77_comm_failure_overview\.csv", "Communication failures: all tests (data)",
+     "Mean and std of the cost increase against no failure per test, level and method.",
+     "07_communication_failure/simulate_communication_failure.py"),
 ]
 
 _COMPILED = [(re.compile(pattern), title, description, script) for pattern, title, description, script in ENTRIES]

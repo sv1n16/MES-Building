@@ -1,5 +1,13 @@
 """Paired comparison of three real-time strategies on identical noisy scenarios.
 
+PURPOSE
+    When the actual load / PV / outdoor temperature differ from the forecast, which
+    real-time strategy keeps the community's cost lowest, and how fast is each?
+    Driver only: the objectives are in each method's module (listed below).
+SCORED PER RUN AND METHOD
+    realised cost = Σ_b Σ_t (π_t g_b,t + c_gas G_b,t) Δt (+ comfort, P2P settlement),
+    grid import, P2P delivered, comfort, solve times.
+
 0. open_loop             Day-ahead plan applied exactly as scheduled with no
                          real-time feedback; all forecast error goes to the
                          grid (simulate_open_loop.py).

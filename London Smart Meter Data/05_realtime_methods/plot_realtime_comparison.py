@@ -1,5 +1,9 @@
 """Plot the three-method real-time comparison written by compare_realtime_methods.py.
 
+PURPOSE
+    Figures only (no optimisation): how far each real-time method drifts from the
+    day-ahead plan in grid import, cost and dispatch, and how long it takes to solve.
+
 Figures (Results/05_realtime_methods):
     37_three_method_grid_import_run_<n>.png  community grid import vs plan
     38_three_method_dispatch_run_<n>.png     battery, P2P, curtailment, temperature

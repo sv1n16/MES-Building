@@ -1,5 +1,12 @@
 """Real-time open loop: the day-ahead plan applied as scheduled, with no feedback.
 
+PURPOSE
+    The no-feedback reference: apply the day-ahead plan exactly and let the grid
+    absorb all forecast error. No optimisation in real time.
+PER HOUR
+    g_b,t = max(0, L^actual + p_hp^plan + c^plan + export^plan − PV^actual − d^plan − import^plan)
+    (any negative remainder is curtailed)
+
 The plan is computed once from the day-ahead forecasts (the cached bilateral
 ADMM schedule) and every setpoint is then executed unchanged while the actual
 load, PV and outdoor temperature of the shared noisy scenario play out:

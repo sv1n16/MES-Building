@@ -1,5 +1,15 @@
 """Showcase-day figures: central optimisation vs the decentralised ADMM methods.
 
+PURPOSE
+    Produce every showcase-day figure: run the central model (no_battery /
+    own_battery / shared scenarios) and both ADMM methods, then compare their
+    cost, comfort, peak import and sharing. The models themselves live in
+    central_optimisation_showcase (central problem written out there),
+    admm_energy_sharing (exchange ADMM) and admm_bilateral_p2p (bilateral ADMM).
+KEY COMPARISON
+    saving_b(method) = cost_b(own_battery) − cost_b(method),
+    every method settled at the same P2P price SHARE_TRADE_FEE_FRAC·π_t.
+
 Imports the model/solver from central_optimisation_showcase and the two ADMM
 implementations, runs them on the showcase day and builds every showcase figure
 (in Results/02_day_ahead_sharing_methods/, or Results/04_day_ahead_scaling/N<NNNN>/ via run_scaling.py):

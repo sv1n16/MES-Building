@@ -1,5 +1,18 @@
 """Noisy real-time simulation using the bilateral ADMM schedule.
 
+PURPOSE
+    The "fixed_schedule" real-time method: follow the day-ahead bilateral ADMM plan
+    and absorb forecast error with simple rules (no re-optimisation). Also creates
+    and caches the shared noise scenarios used by every real-time method.
+NOISE
+    L_actual = max(0, L·(1 + ε_L)),  PV_actual = max(0, PV·(1 + ε_PV)),  ε ~ N(0, σ²)
+RECOURSE RULES PER HOUR
+    1. battery follows its planned charge/discharge, clipped by power and actual SOC
+    2. planned P2P trades delivered up to min(|planned|, seller PV + d, buyer load + c)
+    3. grid takes the rest: g = max(0, net demand); surplus tops up the battery,
+       then is curtailed
+    4. T_in follows the 1R1C model with planned heating and the actual T_out
+
 Examples:
     python simulate_noisy_realtime.py
     python simulate_noisy_realtime.py --load-noise 0.08 --pv-noise 0.30
@@ -388,6 +401,12 @@ def _schedule_signature():
         optimiser.RELAX_BINARIES,
         optimiser.FEE_FRAC,
         optimiser.use_congestion,
+        optimiser.NETWORK_CHARGE,
+        optimiser.NETWORK_CHARGE_GBP_PER_KWH,
+        optimiser.NETWORK_LAYOUT_SEED,
+        optimiser.NETWORK_AREA_M,
+        optimiser.NETWORK_LOSSES,
+        optimiser.NETWORK_LOSS_PER_KW,
     )
     digest.update(repr(settings).encode("utf-8"))
     return digest.hexdigest()

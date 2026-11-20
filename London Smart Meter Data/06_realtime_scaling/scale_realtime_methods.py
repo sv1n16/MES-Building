@@ -1,5 +1,10 @@
 """Run the real-time comparison for several community sizes, with a compute budget.
 
+PURPOSE
+    Do the real-time methods still fit their time step as the community grows
+    (N = 5 … 1000)? Driver only: runs compare_realtime_methods per N under a wall-time
+    budget and records which steps finish.
+
 For every N it:
   1. builds data/showcase_<day>_N<NNNN>.{csv,_batteries.csv} if missing (N=10 uses
      the default showcase dataset), with 01_data_preparation/build_showcase_dataset.py;

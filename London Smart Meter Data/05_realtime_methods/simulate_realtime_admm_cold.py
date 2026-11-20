@@ -1,5 +1,11 @@
 """Rolling ADMM restarted from scratch at every interval, compared with warm start.
 
+PURPOSE
+    Does warm-starting rolling ADMM matter? Same rolling ADMM as compare_realtime_methods,
+    but every hour starts from λ = 0 and z = 0 instead of the previous hour's values.
+    Objective per building = admm_bilateral_p2p_valley subproblem (own cost + w g²
+    + λ q + ρ/2 (q − z)²), over the remaining hours.
+
 At every interval bilateral ADMM is re-solved over the remaining horizon starting
 from zero duals and zero agreed trades (cold start), instead of the previous
 interval's duals and trades (warm start, as in compare_realtime_methods.py).

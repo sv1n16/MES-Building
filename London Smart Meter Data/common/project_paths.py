@@ -51,6 +51,9 @@ EXPERIMENTS = (
     "04_day_ahead_scaling",
     "05_realtime_methods",
     "06_realtime_scaling",
+    "07_communication_failure",
+    "08_minute_resolution",
+    "09_ramp_rate_control",
 )
 
 _experiment: str | None = None

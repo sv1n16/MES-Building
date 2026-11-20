@@ -1,5 +1,12 @@
 """Parallel local re-optimisation: the counterpart of the parallel ADMM for a fair comparison.
 
+PURPOSE
+    Run the local re-optimisation with one process per building, so its timing is
+    comparable with the parallel ADMM.
+PROBLEM PER BUILDING  (same as simulate_realtime_reoptimise "local")
+    min  own cost + FEE_FRAC π Δt Σ_j (q⁻_j − q⁺_j) + share_penalty Δt Σ_j (|q_j^plan| − q⁺_j − q⁻_j)
+    s.t. building model B_b,  q⁺_j ≤ max(q_j^plan, 0),  q⁻_j ≤ max(−q_j^plan, 0)
+
 Same method as simulate_realtime_reoptimise.simulate_local (each building re-solves
 its remaining horizon on its own, planned trades as upper bounds, P2P settlement and
 share penalty, trades reconciled at min(seller offer, buyer acceptance)), with the

@@ -2,6 +2,54 @@
 for the collated *showcase day* — the shared model library, the solver wrapper and
 the P2P trade-fee sweep.
 
+PURPOSE
+    One operator schedules every building of the community for the whole day
+    (24 hourly steps) at minimum community cost. This is the REFERENCE model:
+    every decentralised method (exchange ADMM, bilateral ADMM, rolling
+    re-optimisation) decomposes or re-solves this building model, so the
+    equations below are the ones the other scripts refer to as "the building
+    model B_b".
+
+NOTATION   (b, j = buildings, t = hour, Δt = 1 h)
+    π_t         grid tariff (£/kWh)              c_gas      gas price (£/kWh)
+    L_b,t       electric load (kW)               PV_b,t     PV generation (kW)
+    g_b,t       grid import ≥ 0                  κ_b,t      PV curtailment ≥ 0
+    c_b,t/d_b,t battery charge / discharge       s_b,t      battery SOC (kWh)
+    u_b,t       charging indicator ∈ {0,1}       p_hp       heat-pump electric power
+    f_b,t       heat-pump load fraction ∈ [0,1]  q_boil     boiler heat output
+    G_b,t       gas burnt = q_boil / η_boil      T_b,t      indoor temperature
+    e_ij,t      energy sent from i to j ≥ 0 (P2P share, e_ii = 0)
+
+PROBLEM   (MIQCP: binary u, bilinear COP·p_hp, quadratic comfort term)
+
+    min  Σ_b Σ_t [ π_t g_b,t Δt                         electricity
+                 + c_gas G_b,t Δt                        gas
+                 + α (T_b,t − T^set_t)²                  comfort penalty, α = 0.5
+                 + fee_t(e)                              P2P settlement (see FEE_MODE)
+                 + 1e-4 Σ_j e_bj,t ]                     routing tie-breaker
+
+    s.t. for every building b and hour t                 (= building model B_b)
+      battery    c ≤ u·P̄_b,   d ≤ (1−u)·P̄_b,   0 ≤ s ≤ S̄_b
+                 s_t = s_{t−1} + (η_c c_t − d_t/η_d) Δt,   s_0 = SOC0_b,  c_0 = d_0 = 0
+      heat pump  q_hp,t = COP_t · p_hp,t = p_th_nom · f_t,
+                 COP_t = 2.18 + 0.01 (T_out,t − 7)
+      boiler     G_t = q_boil,t / 0.9
+      thermal    T_t = T_{t−1} + Δt/C · ( q_hp,t + q_boil,t − U (T_{t−1} − T_out,t) ),
+                 C = 10, U = 0.5,  T_0 = T0_b
+      power      g_t + δ·Σ_i e_ib,t − Σ_j e_bj,t − κ_t = L_t + c_t + p_hp,t − d_t − PV_t
+                 (δ = 1, or 1 − frac in FEE_MODE "loss")
+      sharing    Σ_j e_bj,t ≤ PV_t + d_t                 (export only own PV/battery)
+                 δ·Σ_i e_ib,t ≤ L_t + p_hp,t + c_t        (import only what you consume)
+
+    Scenarios switch parts off: "no_battery" fixes c = d = 0, "own_battery"
+    fixes e = 0, "shared" uses everything. A building without a battery always
+    has c = d = 0.
+
+    fee_t(e) per FEE_MODE (frac = fee fraction of the grid tariff):
+      "loss"     0                                  (loss is in δ above)
+      "forfeit"  frac·π_t·Δt·(sent_b + recv_b)       (cash lost by both sides)
+      "market"   frac·π_t·Δt·(recv_b − sent_b)       (sums to 0 over the community)
+
   * Input data  -> data/showcase_<day>.csv  +  data/showcase_<day>_batteries.csv
                    (produced by build_showcase_dataset.py). Hourly, 24 steps.
   * Community   -> HETEROGENEOUS: each building has a battery, PV, both, or neither
@@ -207,6 +255,7 @@ def build_model(
     m.energy_share = pyo.Var(m.buildings, m.buildings, m.t, domain=pyo.NonNegativeReals, initialize=0)
 
     # ---------------- battery constraints ----------------
+    # c[b,t] ≤ u[b,t]·P̄_b ,  d[b,t] ≤ (1 − u[b,t])·P̄_b      (no simultaneous charge + discharge)
     m.charge_max = pyo.Constraint(
         m.buildings, m.t, rule=lambda mm, b, t: mm.charge[b, t] <= mm.charging_state[b, t] * MAXPOW[b]
     )
@@ -214,6 +263,7 @@ def build_model(
         m.buildings, m.t, rule=lambda mm, b, t: mm.discharge[b, t] <= (1 - mm.charging_state[b, t]) * MAXPOW[b]
     )
 
+    # s[b,t] = s[b,t−1] + (η_c·c[b,t] − d[b,t]/η_d)·Δt ,   s[b,0] = SOC0_b
     def soc_balance_rule(mm, b, t):
         if t == 0:
             return mm.soc[b, t] == float(INIT_SOC[b])
@@ -224,6 +274,7 @@ def build_model(
 
     m.soc_balance = pyo.Constraint(m.buildings, m.t, rule=soc_balance_rule)
 
+    # c[b,0] = d[b,0] = 0   (hour 0 is the known initial state)
     m.no_charge_at_start = pyo.Constraint(
         m.buildings, m.t, rule=lambda mm, b, t: mm.charge[b, t] == 0 if t == 0 else pyo.Constraint.Skip
     )
@@ -232,6 +283,9 @@ def build_model(
     )
 
     # ---------------- heat pump & boiler ----------------
+    # q_hp[b,t] = COP[b,t]·p_hp[b,t] = p_th_nom·f[b,t]    (bilinear -> Gurobi NonConvex=2)
+    # COP[b,t]  = cop_base + 0.01·(T_out[t] − T_ref)
+    # G[b,t]    = q_boil[b,t] / η_boil ,  q_boil ≤ max_thermal_power
     m.heat_pump_output = pyo.Constraint(
         m.buildings, m.t, rule=lambda mm, b, t: mm.q_heat_vars[b, t] == mm.cop[b, t] * mm.p_hp[b, t]
     )
@@ -251,6 +305,8 @@ def build_model(
     delivered = (1.0 - fee_frac) if fee_mode == "loss" else 1.0
 
     # ---------------- balances ----------------
+    # power balance:  g + δ·Σ_i e[i,b] − Σ_j e[b,j] − κ  =  L + c + p_hp − d − PV
+    #                 (supply side)                        (net demand side)
     def electricity_balance_rule(mm, b, t):
         energy_received = delivered * sum(mm.energy_share[i, b, t] for i in mm.buildings if i != b)
         energy_sent = sum(mm.energy_share[b, j, t] for j in mm.buildings if j != b)
@@ -260,10 +316,13 @@ def build_model(
 
     m.electricity_balance = pyo.Constraint(m.buildings, m.t, rule=electricity_balance_rule)
 
+    # heat balance:   q_heat = q_hp + q_boil
     m.heat_balance = pyo.Constraint(
         m.buildings, m.t, rule=lambda mm, b, t: mm.q_heat_vars[b, t] + mm.q_boiler_vars[b, t] == mm.q_heat[b, t]
     )
 
+    # 1R1C thermal model (C = 10, U = 0.5):
+    #   T_in[t] = T_in[t−1] + Δt/C·( q_heat[t] − U·(T_in[t−1] − T_out[t]) ),   T_in[0] = T0_b
     def thermal_dynamics_rule(mm, b, t):
         if t == 0:
             return mm.T_in[b, t] == float(INIT_T_IN[b])
@@ -274,6 +333,9 @@ def build_model(
     m.thermal_dynamics = pyo.Constraint(m.buildings, m.t, rule=thermal_dynamics_rule)
 
     # ---------------- sharing limits ----------------
+    # export:  Σ_j e[b,j,t] ≤ PV[b,t] + d[b,t]          (only own PV / battery can be sold)
+    # import:  δ·Σ_i e[i,b,t] ≤ L[b,t] + p_hp[b,t] + c[b,t]   (only buy what you consume)
+    # e[b,b,t] = 0                                      (no self-sharing)
     def energy_export_limit_rule(mm, b, t):
         energy_sent = sum(mm.energy_share[b, j, t] for j in mm.buildings if j != b)
         return energy_sent <= mm.pv_supply[b, t] + mm.discharge[b, t]
@@ -302,6 +364,7 @@ def build_model(
             m.energy_share[idx].fix(0.0)
 
     # ---------------- objective ----------------
+    # min Σ_b Σ_t  π_t·g·Δt + c_gas·G·Δt + α·(T_in − T_set)² + fee_t(e) + 1e-4·Σ_j e[b,j,t]
     def objective_rule(mm):
         total = 0.0
         for b in mm.buildings:

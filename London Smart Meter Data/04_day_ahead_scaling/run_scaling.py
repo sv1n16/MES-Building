@@ -1,5 +1,9 @@
 """Run the showcase comparison across community sizes and collect the compute cost.
 
+PURPOSE
+    How do the day-ahead methods scale with community size N (compute time, memory,
+    success)? Driver only: it runs showcase_comparison.py at each N, no model here.
+
 For each N it:
   1. builds  data/showcase_<day>_N<NNNN>.{csv, _batteries.csv}  if missing
      (real LCL ToU households; the diversity filters in sharing_showcase._prep are

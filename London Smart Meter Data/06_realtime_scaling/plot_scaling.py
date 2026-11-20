@@ -1,5 +1,10 @@
 """Plot the community-size scaling run written by scale_realtime_methods.py.
 
+PURPOSE
+    Figures only: how solve time, ADMM iterations and per-building savings change with
+    community size N.
+    saving_b(method) = cost_b(open loop) − cost_b(method)
+
 Figures (Results/06_realtime_scaling):
     60_scaling_solve_time.png         day-ahead and real-time solve time vs community size
     61_scaling_admm_iterations.png    ADMM iterations vs community size
